@@ -1,75 +1,77 @@
 # yui-quant-lab
 
-Minimal Flask webhook server for receiving TradingView alerts.
+Breakout 訊號與 GEX 脈絡下的輕量決策實驗室：接收外部 alert、輸出結構化指令與日誌，方便接上實盤或通知層。
 
-## What this project does
+## 系統架構（總覽）
 
-- `GET /health`: returns server status
-- `POST /webhook`: receives TradingView alert JSON
-- Validates required fields:
-  - `symbol`
-  - `signal`
-  - `price`
-  - `breakout_level`
-  - `delta_strength`
+```mermaid
+flowchart TB
+  TV[TradingView]
+  WH[webhook REST]
+  Flask[Flask Server]
+  DE[Decision Engine]
+  CW[CommandWriter]
+  Broker[Broker API]
+  TG[Telegram Bot]
+  Human[Human]
+  Log[Signal Log JSONL]
 
-## Project files
-
-- `app.py`: webhook server
-- `requirements.txt`: Python dependencies
-- `.gitignore`: ignored local/system files
-
-## Setup (Windows PowerShell)
-
-```powershell
-cd C:\Users\user\.cursor\projects\yui-quant-lab
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+  TV --> WH --> Flask --> DE
+  DE --> CW --> Broker
+  DE --> TG
+  TG <--> Human
+  DE --> Log
 ```
 
-## Run
+**現況**：`app.py` 的 `/webhook` 目前已驗證 JSON；完整串接決策引擎與 CommandWriter 仍為下一步（見 [docs/roadmap.md](docs/roadmap.md)）。
 
-```powershell
+## 資料流（Data Flow）
+
+```mermaid
+flowchart TB
+  TV[TradingView] --> WH[Webhook] --> DE[Decision Engine]
+  DE --> CW[CommandWriter] --> EX[Execution]
+  DE --> TN[Telegram Notify]
+  DE --> JL[Log JSONL]
+```
+
+## 專案結構
+
+```
+yui-quant-lab/
+├── README.md
+├── docs/
+│   ├── architecture.md   # 系統架構與資料流
+│   ├── modules.md        # 各模組職責與介面
+│   └── roadmap.md        # 開發進度與下一步
+├── decision_engine.py    # CHASE / RETEST / SKIP 決策
+├── command_writer.py     # 寫入 order_command.json、signal_log.jsonl
+├── app.py                # Flask：健康檢查與 TradingView webhook
+├── telegram_bot.py       # Telegram 整合（預留）
+└── output/               # 執行期產物（勿手動編輯為主）
+```
+
+## 快速開始
+
+本機啟動 HTTP 服務（預設 `0.0.0.0:5000`）：
+
+```bash
 python app.py
 ```
 
-Server runs at:
+- `GET /health`：健康檢查  
+- `POST /webhook`：接收 JSON alert（欄位見 `app.py` 內 `REQUIRED_FIELDS`）
 
-- `http://127.0.0.1:5000`
+決策引擎單機試跑：
 
-## Quick test
-
-Health check:
-
-```powershell
-Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:5000/health"
+```bash
+python decision_engine.py
 ```
 
-Webhook test:
+## 文件
 
-```powershell
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/webhook" -ContentType "application/json" -Body '{"symbol":"BTCUSDT","signal":"BUY","price":68000,"breakout_level":67500,"delta_strength":1.2}'
-```
+詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)。
 
-## TradingView webhook settings
+## 免責
 
-- Webhook URL:
-  - `https://<your-ngrok-domain>/webhook`
-- Alert Message (JSON):
-
-```json
-{
-  "symbol": "{{ticker}}",
-  "signal": "BUY",
-  "price": {{close}},
-  "breakout_level": 0,
-  "delta_strength": 0
-}
-```
-
-## Common errors
-
-- `405 Method Not Allowed`: you opened `/webhook` with GET in browser. `/webhook` accepts POST only.
-- `400 Bad Request`: invalid JSON or missing required fields.
-- `ERR_CONNECTION_REFUSED`: Flask server is not running on port `5000`.
+本專案為研究與工程實驗用途；任何交易決策與風險由使用者自行承擔。
