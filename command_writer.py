@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
+
+from time_utils import iso_now_taipei
 
 # --- 路徑（可依部署調整，集中於此） ---
 OUTPUT_DIR = Path("output")
@@ -51,25 +52,21 @@ def _resolved_allowed_actions(override: Iterable[str] | None) -> frozenset[str]:
     return DEFAULT_ALLOWED_ACTIONS | frozenset(_EXTRA_ALLOWED_ACTIONS)
 
 
-def _utc_timestamp_z() -> str:
-    """UTC ISO8601，毫秒精度，後綴 Z。"""
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+def _iso_timestamp_taipei() -> str:
+    """台北時區 ISO8601（秒精度，+08:00）。"""
+    return iso_now_taipei()
 
 
 def _ensure_output_dir() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _build_command_id(timestamp_utc_z: str, symbol: str, action: str) -> str:
+def _build_command_id(timestamp_iso: str, symbol: str, action: str) -> str:
     """
     command_id 格式：{timestamp}|{symbol}|{action}
     與 timestamp / symbol / action 對齊，便於稽核與去重。
     """
-    return f"{timestamp_utc_z}|{symbol}|{action}"
+    return f"{timestamp_iso}|{symbol}|{action}"
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -95,7 +92,7 @@ def write_order_command(
     寫入一筆交易指令到 output/order_command.json（覆蓋寫入）。
 
     寫入前會自動補上：
-    - timestamp（UTC ISO8601，含 Z）
+    - timestamp（台北時區 ISO8601，+08:00）
     - command_id（timestamp|symbol|action）
 
     輸出 schema 至少包含：action, symbol, price, plan, timestamp, command_id；
@@ -161,7 +158,7 @@ def write_order_command(
         else:
             raise TypeError("signal 若提供則必須為 str 或 None")
 
-    ts = _utc_timestamp_z()
+    ts = _iso_timestamp_taipei()
     out["action"] = action
     out["symbol"] = symbol
     out["price"] = price_f
@@ -255,7 +252,7 @@ def append_signal_log(record: dict[str, Any]) -> dict[str, Any]:
 
     會保留傳入 record 的所有欄位（淺拷貝）：
     - 若 record 已含 timestamp，一律保留原值、不覆寫。
-    - 一律新增 logged_at（UTC ISO8601 + Z），代表寫入日誌的時間。
+    - 一律新增 logged_at（台北時區 ISO8601 +08:00），代表寫入日誌的時間。
 
     Returns
     -------
@@ -266,7 +263,7 @@ def append_signal_log(record: dict[str, Any]) -> dict[str, Any]:
         raise TypeError("record 必須為 dict")
 
     line_obj: dict[str, Any] = dict(record)
-    line_obj["logged_at"] = _utc_timestamp_z()
+    line_obj["logged_at"] = _iso_timestamp_taipei()
 
     _ensure_output_dir()
     payload = json.dumps(line_obj, ensure_ascii=False, separators=(",", ":"))

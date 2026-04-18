@@ -6,14 +6,15 @@
 - [x] 指令與日誌寫入：`write_order_command`、`append_signal_log`、原子寫入  
 - [x] Flask 最小服務：`/health`、`/webhook` 與 JSON 欄位驗證  
 - [x] 專案文件：`README`、`docs/architecture`、`docs/modules`  
+- [x] State Manager MVP complete：`state_manager.py`、`output/state.json`、跨日 reset、state gate、before/after state snapshots
 
 ## 進行中／下一步（建議優先序）
 
-1. **Webhook → 決策 → 寫檔**：在 `app.py` 驗證通過後組裝 `nq_eod` / `qqq_intraday`（來源可为 webhook 擴充欄位或另一設定檔），呼叫 `decide_trade`，再依結果呼叫 `write_order_command` / `append_signal_log`。  
-2. **Webhook 擴充欄位**：與資料來源對齊 `levels`、`bias`、`regime` 等，並定版 JSON schema（可放 `docs/` 或 OpenAPI 片段）。  
+1. **Execution 回報整合**：接 broker fill / execution report，落地 `apply_fill_result(...)` 更新 `today_loss` / `consecutive_loss`。  
+2. **Webhook schema 定版**：與資料來源對齊 `levels`、`bias`、`regime`、state override 欄位。  
 3. **安全**：webhook 密鑰或簽章、速率限制、禁止 debug 上線。  
-4. **`telegram_bot.py`**：讀取 `output/order_command.json` 或訂閱內部事件，實作推播與（可選）確認流程。  
-5. **測試**：對 `decision_engine`、`command_writer` 補單元測試；對 `/webhook` 做整合測試。  
+4. **Telegram 正式串接**：由 stub/print 升級為實際 Bot API 發送與重試策略。  
+5. **測試擴充**：補 decision_engine、command_writer 細項單元測試與失敗注入測試。  
 
 ## 長期可選
 

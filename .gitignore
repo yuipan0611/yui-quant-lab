@@ -11,6 +11,13 @@ env/
 # Environment variables and secrets
 .env
 .env.*
+!.env.example
+
+# Runtime outputs (local runs; not versioned)
+output/orders/
+output/execution_events.jsonl
+output/state.json
+output/fill_request_ids.json
 
 # Logs
 *.log

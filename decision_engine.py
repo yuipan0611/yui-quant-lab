@@ -16,6 +16,9 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, TypedDict
 
+from state_manager import REGIME_HIGH_VOL
+from time_utils import iso_now_taipei
+
 # --- 閾值（集中管理，方便回測時掃參） ---
 MIN_DELTA_STRENGTH = 0.7
 MIN_ROOM_POINTS = 40
@@ -24,6 +27,18 @@ MAX_EXTENSION_POINTS = 30
 Decision = Literal["CHASE", "RETEST", "SKIP"]
 Signal = Literal["long_breakout", "short_breakout"]
 EntryStyle = Literal["market_chase", "wait_retest", "no_trade"]
+Branch = Literal["LONG", "SHORT", "NONE"]
+
+# --- decision trace（可解釋層）reason_code ---
+REASON_LOW_DELTA = "LOW_DELTA"
+REASON_UNSUPPORTED_SIGNAL = "UNSUPPORTED_SIGNAL"
+REASON_BIAS_CONFLICT = "BIAS_CONFLICT"
+REASON_NO_ROOM = "NO_ROOM"
+REASON_EXTENSION_TOO_LARGE = "EXTENSION_TOO_LARGE"
+REASON_CHASE_OK = "CHASE_OK"
+REASON_HIGH_VOL_DOWNGRADE = "HIGH_VOL_DOWNGRADE"
+# 由 app 層 state gate 合成 trace 時使用（引擎內不會回傳此 code）
+REASON_STATE_GATE = "STATE_GATE"
 
 
 class TradeInput(TypedDict):
@@ -57,10 +72,32 @@ class Plan(TypedDict):
     reference_levels: ReferenceLevels
 
 
+class DecisionTraceInputs(TypedDict):
+    """trace.inputs：欄位齊全，無資料處以 null。"""
+
+    delta_strength: float | None
+    room_points: float | None
+    extension_points: float | None
+    regime: str | None
+    bias: str | None
+
+
+class DecisionTrace(TypedDict):
+    """單筆決策可追溯結構（dict）。"""
+
+    decision: Decision
+    reason_code: str
+    inputs: DecisionTraceInputs
+    branch: Branch
+    downgraded_from: Decision | None
+    timestamp: str
+
+
 class DecideResult(TypedDict):
     decision: Decision
     reason: str
     plan: Plan
+    trace: DecisionTrace
 
 
 def _float_levels(levels: dict[str, Any]) -> list[float]:
@@ -147,10 +184,103 @@ def _build_plan(
     return {"entry_style": entry, "risk_note": risk, "reference_levels": ref}
 
 
+def _branch_from_signal_raw(signal_raw: str) -> Branch:
+    if signal_raw == "long_breakout":
+        return "LONG"
+    if signal_raw == "short_breakout":
+        return "SHORT"
+    return "NONE"
+
+
+def _room_points_for_signal(
+    signal: Signal, price: float, nearest_r: float | None, nearest_s: float | None
+) -> float | None:
+    """多：上方 room（resistance - price）；空：下方 room（price - support）；無關鍵價則 null。"""
+    if signal == "long_breakout":
+        if nearest_r is None:
+            return None
+        return float(nearest_r) - float(price)
+    if nearest_s is None:
+        return None
+    return float(price) - float(nearest_s)
+
+
+def _decide_trace(
+    *,
+    decision: Decision,
+    reason_code: str,
+    delta_strength: float,
+    room_points: float | None,
+    extension_points: float,
+    regime: str | None,
+    bias: str,
+    branch: Branch,
+    downgraded_from: Decision | None,
+) -> DecisionTrace:
+    return {
+        "decision": decision,
+        "reason_code": reason_code,
+        "inputs": {
+            "delta_strength": float(delta_strength),
+            "room_points": room_points,
+            "extension_points": float(extension_points),
+            "regime": regime,
+            "bias": bias,
+        },
+        "branch": branch,
+        "downgraded_from": downgraded_from,
+        "timestamp": iso_now_taipei(),
+    }
+
+
+def _finish_decide(
+    decision: Decision,
+    reason: str,
+    extension_val: float,
+    *,
+    reason_code: str,
+    branch: Branch,
+    delta_strength: float,
+    room_points: float | None,
+    regime: str | None,
+    bias: str,
+    nearest_r: float | None,
+    nearest_s: float | None,
+    price: float,
+    breakout_level: float,
+    downgraded_from: Decision | None = None,
+) -> DecideResult:
+    return {
+        "decision": decision,
+        "reason": reason,
+        "plan": _build_plan(
+            decision,
+            price=price,
+            breakout_level=breakout_level,
+            nearest_resistance=nearest_r,
+            nearest_support=nearest_s,
+            extension=float(extension_val),
+            regime=regime,
+        ),
+        "trace": _decide_trace(
+            decision=decision,
+            reason_code=reason_code,
+            delta_strength=delta_strength,
+            room_points=room_points,
+            extension_points=float(extension_val),
+            regime=regime,
+            bias=bias,
+            branch=branch,
+            downgraded_from=downgraded_from,
+        ),
+    }
+
+
 def decide_trade(
     trade_input: TradeInput,
-    nq_eod: NqEod,
-    qqq_intraday: QqqIntraday,
+    nq_eod: NqEod | None = None,
+    qqq_intraday: QqqIntraday | None = None,
+    state: dict[str, Any] | None = None,
 ) -> DecideResult:
     """
     依 breakout 訊號 + GEX（levels / bias）輸出 CHASE / RETEST / SKIP。
@@ -166,12 +296,25 @@ def decide_trade(
         levels（GEX 價位）與 bias。
     qqq_intraday :
         regime 僅供輸出參考。
+
+    Returns
+    -------
+    DecideResult
+        含既有 `decision` / `reason` / `plan`，以及 `trace`（決策可解釋層）。
     """
     _ = str(trade_input.get("symbol", ""))  # 預留給日後路由／日誌
     signal_raw = trade_input.get("signal", "")
     price = float(trade_input["price"])
     breakout_level = float(trade_input["breakout_level"])
     delta_strength = float(trade_input["delta_strength"])
+
+    nq_eod = nq_eod or {
+        "levels": trade_input.get("levels", {}),  # type: ignore[dict-item]
+        "bias": trade_input.get("bias", "neutral"),  # type: ignore[dict-item]
+    }
+    qqq_intraday = qqq_intraday or {
+        "regime": trade_input.get("regime", ""),  # type: ignore[dict-item]
+    }
 
     levels = nq_eod.get("levels") or {}
     if not isinstance(levels, dict):
@@ -182,96 +325,152 @@ def decide_trade(
         bias = str(bias)
 
     regime = qqq_intraday.get("regime")
+    if (not regime) and state:
+        regime = state.get("regime")
     regime_s = regime.strip() if isinstance(regime, str) else (str(regime) if regime is not None else "")
 
     nearest_r = _nearest_resistance_above_price(levels, price)
     nearest_s = _nearest_support_below_price(levels, price)
-
-    def _result(decision: Decision, reason: str, extension: float) -> DecideResult:
-        return {
-            "decision": decision,
-            "reason": reason,
-            "plan": _build_plan(
-                decision,
-                price=price,
-                breakout_level=breakout_level,
-                nearest_resistance=nearest_r,
-                nearest_support=nearest_s,
-                extension=extension,
-                regime=regime_s or None,
-            ),
-        }
+    regime_display = regime_s or None
 
     # 1) delta 過弱
     if delta_strength < MIN_DELTA_STRENGTH:
+        br = _branch_from_signal_raw(str(signal_raw))
         ext = (
             _calculate_extension(signal_raw, price, breakout_level)  # type: ignore[arg-type]
             if signal_raw in ("long_breakout", "short_breakout")
             else 0.0
         )
-        return _result(
+        room_pts: float | None = None
+        if br == "LONG":
+            room_pts = _room_points_for_signal("long_breakout", price, nearest_r, nearest_s)
+        elif br == "SHORT":
+            room_pts = _room_points_for_signal("short_breakout", price, nearest_r, nearest_s)
+        return _finish_decide(
             "SKIP",
             (
                 f"delta_strength_below_threshold "
                 f"(value={delta_strength:.4f}, min={MIN_DELTA_STRENGTH})"
             ),
             ext,
+            reason_code=REASON_LOW_DELTA,
+            branch=br,
+            delta_strength=delta_strength,
+            room_points=room_pts,
+            regime=regime_display,
+            bias=bias,
+            nearest_r=nearest_r,
+            nearest_s=nearest_s,
+            price=price,
+            breakout_level=breakout_level,
         )
 
     # 2) 非法 signal（reason 固定；不計入多空規則）
     if signal_raw not in ("long_breakout", "short_breakout"):
-        return _result("SKIP", "unsupported_signal", 0.0)
+        return _finish_decide(
+            "SKIP",
+            "unsupported_signal",
+            0.0,
+            reason_code=REASON_UNSUPPORTED_SIGNAL,
+            branch="NONE",
+            delta_strength=delta_strength,
+            room_points=None,
+            regime=regime_display,
+            bias=bias,
+            nearest_r=nearest_r,
+            nearest_s=nearest_s,
+            price=price,
+            breakout_level=breakout_level,
+        )
 
     signal: Signal = signal_raw  # type: ignore[assignment]
-
     extension = _calculate_extension(signal, price, breakout_level)
+    room_pts = _room_points_for_signal(signal, price, nearest_r, nearest_s)
 
     if signal == "long_breakout":
         if not _is_bias_supported(signal, bias):
             decision = "SKIP"
             reason = f"bias_not_supporting_long (bias={bias!r})"
+            reason_code = REASON_BIAS_CONFLICT
         elif nearest_r is not None and (nearest_r - price) < MIN_ROOM_POINTS:
             decision = "RETEST"
             reason = (
                 f"room_to_resistance_below_{MIN_ROOM_POINTS} "
                 f"(resistance={nearest_r:.4f}, room={nearest_r - price:.4f})"
             )
+            reason_code = REASON_NO_ROOM
         elif extension > MAX_EXTENSION_POINTS:
             decision = "RETEST"
             reason = (
                 f"extension_above_{MAX_EXTENSION_POINTS} "
                 f"(extension={extension:.4f})"
             )
+            reason_code = REASON_EXTENSION_TOO_LARGE
         else:
             decision = "CHASE"
             reason = (
                 f"chase_ok (extension={extension:.4f}, "
                 f"nearest_resistance={nearest_r}, room_ok=True)"
             )
+            reason_code = REASON_CHASE_OK
     else:
         if not _is_bias_supported(signal, bias):
             decision = "SKIP"
             reason = f"bias_not_supporting_short (bias={bias!r})"
+            reason_code = REASON_BIAS_CONFLICT
         elif nearest_s is not None and (price - nearest_s) < MIN_ROOM_POINTS:
             decision = "RETEST"
             reason = (
                 f"room_to_support_below_{MIN_ROOM_POINTS} "
                 f"(support={nearest_s:.4f}, room={price - nearest_s:.4f})"
             )
+            reason_code = REASON_NO_ROOM
         elif extension > MAX_EXTENSION_POINTS:
             decision = "RETEST"
             reason = (
                 f"extension_above_{MAX_EXTENSION_POINTS} "
                 f"(extension={extension:.4f})"
             )
+            reason_code = REASON_EXTENSION_TOO_LARGE
         else:
             decision = "CHASE"
             reason = (
                 f"chase_ok (extension={extension:.4f}, "
                 f"nearest_support={nearest_s}, room_ok=True)"
             )
+            reason_code = REASON_CHASE_OK
 
-    return _result(decision, reason, extension)
+    downgraded_from: Decision | None = None
+    reason_code_out: str = reason_code
+    if regime_s == REGIME_HIGH_VOL and decision == "CHASE":
+        high_vol_delta_floor = MIN_DELTA_STRENGTH + 0.2
+        high_vol_extension_cap = max(5.0, MAX_EXTENSION_POINTS - 10.0)
+        if delta_strength < high_vol_delta_floor or extension > high_vol_extension_cap:
+            decision = "RETEST"
+            reason = (
+                "high_vol_guardrail "
+                f"(delta={delta_strength:.4f}, min={high_vol_delta_floor:.4f}, "
+                f"extension={extension:.4f}, cap={high_vol_extension_cap:.4f})"
+            )
+            reason_code_out = REASON_HIGH_VOL_DOWNGRADE
+            downgraded_from = "CHASE"
+
+    return _finish_decide(
+        decision,
+        reason,
+        extension,
+        reason_code=reason_code_out,
+        branch="LONG" if signal == "long_breakout" else "SHORT",
+        delta_strength=delta_strength,
+        room_points=room_pts,
+        regime=regime_display,
+        bias=bias,
+        nearest_r=nearest_r,
+        nearest_s=nearest_s,
+        price=price,
+        breakout_level=breakout_level,
+        downgraded_from=downgraded_from,
+    )
 
 
 if __name__ == "__main__":

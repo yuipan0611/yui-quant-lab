@@ -1,0 +1,17 @@
+{
+  "symbol": "MNQ",
+  "signal": "long_breakout",
+  "price": 20150.0,
+  "breakout_level": 20140.0,
+  "delta_strength": 0.95,
+  "nq_eod": {
+    "levels": {
+      "r1": 20300.0,
+      "s1": 20000.0
+    },
+    "bias": "bullish"
+  },
+  "qqq_intraday": {
+    "regime": "normal"
+  }
+}
