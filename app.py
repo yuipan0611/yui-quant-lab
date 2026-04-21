@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 import os
+from pathlib import Path
 import traceback
 from uuid import uuid4
 
 from flask import Flask, jsonify, request
+from dotenv import load_dotenv
 
 from command_writer import append_signal_log, write_order_command
 from decision_engine import REASON_STATE_GATE, decide_trade
@@ -27,6 +29,9 @@ from state_manager import (
 )
 from telegram_bot import notify_decision, notify_fill_result, process_telegram_webhook
 from time_utils import iso_now_taipei
+
+# Load local .env automatically for repeatable startup without manual exports.
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
 app = Flask(__name__)
 
@@ -570,4 +575,4 @@ def order_event():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=80, debug=False)

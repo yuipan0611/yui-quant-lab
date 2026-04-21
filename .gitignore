@@ -14,13 +14,12 @@ env/
 !.env.example
 
 # Runtime outputs (local runs; not versioned)
-output/orders/
-output/execution_events.jsonl
-output/state.json
-output/fill_request_ids.json
+output/*
+!output/.gitkeep
 
 # Logs
 *.log
+nohup.out
 
 # OS and editor files
 .DS_Store

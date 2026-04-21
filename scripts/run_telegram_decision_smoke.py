@@ -7,11 +7,13 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Repo root: scripts/ -> parent
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+load_dotenv(dotenv_path=_ROOT / ".env", override=False)
 
 
 def sample_summary() -> dict:

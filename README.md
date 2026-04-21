@@ -117,6 +117,12 @@ python scripts/run_telegram_decision_smoke.py telegram
 
 PowerShell 可改用：`$env:ENABLE_TELEGRAM_NOTIFY="true"`（並確認已設定 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）。
 
+也可一次性產生專案 `.env`（下次重開終端不需重設）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup_env.ps1
+```
+
 ### State 欄位語意（本版）
 
 - `today_realized_pnl`：**當日已實現損益累加值**（有號數；獲利為正、虧損為負），由 `/fill-result` 的 `pnl` 累加而來。  
@@ -126,7 +132,33 @@ PowerShell 可改用：`$env:ENABLE_TELEGRAM_NOTIFY="true"`（並確認已設定
 去重儲存：`output/fill_request_ids.json`（`processed_keys`：`req:` / `fill:` 前綴）。  
 Lifecycle 儲存：`output/orders/<request_id>.json`；事件流水：`output/execution_events.jsonl`。
 
-上述路徑與本機 `state.json` 已由 `.gitignore` 排除，避免把實驗流水推上遠端；版庫內僅保留 `output/order_command.json`、`output/signal_log.jsonl` 作為**結構範例**（實際內容以你機器上跑出的為準）。
+上述路徑與本機 `state.json` 等執行期產物，預設由 `.gitignore`（`output/*` + `!output/.gitkeep`）排除，避免把實驗流水推上遠端。若你的 repo 曾經追蹤過 `output/*.json`，請在本機確認是否要用 `git rm --cached` 停止追蹤（避免之後誤提交）。
+
+## Phase 3: End-to-End Verified
+
+**目標**：TradingView → VPS（Flask，`/tv-webhook`）→ decision engine → `output/signal_log.jsonl` → Telegram，單筆 alert 可重現驗收。
+
+- **Webhook URL（HTTP、port 80）**：`http://<VPS公網IP>/tv-webhook`（TradingView 僅允許 80/443；本專案 VPS 驗證為 **80**。）
+- **TradingView Alert message（最小 JSON 範例）**：
+
+```json
+{
+  "secret": "your_secret_here",
+  "symbol": "MNQ",
+  "signal": "long_breakout",
+  "price": 20150,
+  "breakout_level": 20145,
+  "delta_strength": 0.88
+}
+```
+
+`secret` 必須與伺服器 `.env` 的 `TV_WEBHOOK_SECRET` **完全一致**（逐字比對）。
+
+- **如何快速判斷成功**：
+  1. `tail` 看 `output/signal_log.jsonl`：同一 `request_id` 可追到 `tv_webhook_received` → `decision_result` →（若有下單意圖）`command_write` 等事件鏈。
+  2. Telegram 收到對應決策通知（與 `ENABLE_TELEGRAM_NOTIFY=true` 設定一致）。
+
+更完整的欄位說明、排錯與單筆真 alert 驗收清單見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)；VPS 啟動與 `curl` 驗收指令見 [docs/vps_runbook.md](docs/vps_runbook.md)。
 
 ### Fixture 重播與 E2E
 
@@ -147,7 +179,7 @@ python decision_engine.py
 
 ## 文件
 
-詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）。
+詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）；Phase 3 與 VPS 操作另見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)、[docs/vps_runbook.md](docs/vps_runbook.md)。
 
 ## 測試
 
