@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 import os
 from pathlib import Path
 import traceback
@@ -29,6 +31,7 @@ from state_manager import (
 )
 from telegram_bot import notify_decision, notify_fill_result, process_telegram_webhook
 from time_utils import iso_now_taipei
+from webhook_dedupe import fingerprint_for, is_duplicate, remember
 
 # Load local .env automatically for repeatable startup without manual exports.
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
@@ -43,6 +46,64 @@ REQUIRED_FIELDS = [
     "breakout_level",
     "delta_strength",
 ]
+
+_RAW_LOG_POST_PATHS = frozenset(
+    {
+        "/webhook",
+        "/tv-webhook",
+        "/fill-result",
+        "/order-event",
+        "/telegram/webhook",
+    }
+)
+_RAW_LOG_BODY_MAX = 8192
+_RAW_LOG_WEBHOOK_SNIPPET_MAX = 2048
+
+
+def _raw_log_mode() -> str:
+    """
+    RAW_REQUEST_LOG_MODE（白話）：
+    - compact（預設）：/webhook、/tv-webhook 仍保留「可讀一小段 JSON preview」（較短）；
+      其他 POST 只記 sha256 摘要，避免 fill / order-event 把 journal 打爆。
+    - verbose：除錯用，preview 上限回到較大（仍會遮罩 tv secret）。
+    - metadata_only：正式環境推薦；只記路徑/IP/長度等，不記 body 內容。
+    - off：完全不印 raw_request（最省）；業務 JSONL 仍照常寫。
+    """
+    raw = (os.environ.get("RAW_REQUEST_LOG_MODE") or "compact").strip().lower()
+    if raw in ("verbose", "compact", "metadata_only", "off"):
+        return raw
+    return "compact"
+
+
+def _client_ip_for_log() -> str | None:
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        first = xff.split(",")[0].strip()
+        return first or None
+    return request.remote_addr
+
+
+def _preview_body_for_raw_log(path: str, raw: bytes, max_bytes: int) -> tuple[str, bool]:
+    """
+    Return (preview_text, truncated). For /tv-webhook, mask JSON "secret" when parseable.
+    """
+    truncated = len(raw) > max_bytes
+    if path == "/tv-webhook":
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+            if isinstance(obj, dict) and "secret" in obj:
+                redacted = dict(obj)
+                redacted["secret"] = "***redacted***"
+                text = json.dumps(redacted, ensure_ascii=False)
+                if len(text) > max_bytes:
+                    return text[:max_bytes] + "…", True
+                return text, truncated
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    snippet = raw[:max_bytes].decode("utf-8", errors="replace")
+    if truncated:
+        snippet = snippet + "…"
+    return snippet, truncated
 
 
 def _new_request_id() -> str:
@@ -272,6 +333,56 @@ def process_webhook_payload(payload: dict, request_id: str) -> dict:
     }
 
 
+@app.before_request
+def _log_raw_incoming_request() -> None:
+    """
+    Debug：把進來的 POST 摘要打到 stdout（systemd 下可用 journalctl 看）。
+
+    設計理念（白話）：
+    - logging 是為了「出問題時能追」，不是要把所有 bytes 永久存進 OS 日誌。
+    - 交易系統最怕「日誌比主流程還重」：所以預設 compact，並提供 metadata_only / off。
+    """
+    if request.method != "POST" or request.path not in _RAW_LOG_POST_PATHS:
+        return None
+    mode = _raw_log_mode()
+    if mode == "off":
+        return None
+    try:
+        raw = request.get_data(cache=True, as_text=False)
+        record: dict[str, object] = {
+            "event": "raw_request",
+            "method": request.method,
+            "path": request.path,
+            "client_ip": _client_ip_for_log(),
+            "content_length": request.content_length,
+            "body_bytes": len(raw),
+            "log_mode": mode,
+        }
+        if mode == "metadata_only":
+            record["content_type"] = request.headers.get("Content-Type")
+            print(json.dumps(record, ensure_ascii=False), flush=True)
+            return None
+
+        if mode == "verbose":
+            max_bytes = _RAW_LOG_BODY_MAX
+            preview, truncated = _preview_body_for_raw_log(request.path, raw, max_bytes)
+        else:
+            # compact
+            if request.path in ("/webhook", "/tv-webhook"):
+                max_bytes = _RAW_LOG_WEBHOOK_SNIPPET_MAX
+                preview, truncated = _preview_body_for_raw_log(request.path, raw, max_bytes)
+            else:
+                preview = f"sha256={hashlib.sha256(raw).hexdigest()}"
+                truncated = False
+
+        record["truncated"] = truncated
+        record["body_preview"] = preview
+        print(json.dumps(record, ensure_ascii=False), flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] raw_request log failed: {exc}", flush=True)
+    return None
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
@@ -304,8 +415,26 @@ def webhook():
             required_fields=REQUIRED_FIELDS,
         )
 
+    if is_duplicate("/webhook", payload):
+        fp = fingerprint_for("/webhook", payload)
+        _safe_log(
+            {
+                "event_type": "webhook_duplicate_ignored",
+                "endpoint": "/webhook",
+                "fingerprint": fp,
+                "timestamp": iso_now_taipei(),
+            }
+        )
+        return jsonify(
+            {
+                "status": "duplicate_ignored",
+                "message": "Same webhook payload was recently processed; ignored for idempotency.",
+            }
+        ), 200
+
     request_id = _new_request_id()
     result = process_webhook_payload(payload, request_id=request_id)
+    remember("/webhook", payload)
     return jsonify(
         {
             "status": "success",
@@ -343,6 +472,24 @@ def tv_webhook():
     if not isinstance(sym_raw, str) or not sym_raw.strip():
         return _tv_bad("bad_payload")
 
+    if is_duplicate("/tv-webhook", body):
+        fp = fingerprint_for("/tv-webhook", body)
+        _safe_log(
+            {
+                "event_type": "webhook_duplicate_ignored",
+                "endpoint": "/tv-webhook",
+                "fingerprint": fp,
+                "timestamp": iso_now_taipei(),
+            }
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "duplicate": True,
+                "message": "Same tv-webhook payload was recently processed; ignored for idempotency.",
+            }
+        ), 200
+
     request_id = _new_request_id()
     now_iso = iso_now_taipei()
     sanitized = _sanitize_tv_payload_for_log(body)
@@ -364,6 +511,8 @@ def tv_webhook():
         print(f"[error] tv_webhook process_webhook_payload failed: {exc}")
         traceback.print_exc()
         return jsonify({"ok": False, "error": "internal_error"}), 500
+
+    remember("/tv-webhook", body)
 
     tr_raw = result.get("trace")
     tr = tr_raw if isinstance(tr_raw, dict) else {}
@@ -575,4 +724,6 @@ def order_event():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80, debug=False)
+    # Local dev only. Production: Nginx :80 -> Gunicorn 127.0.0.1:8000 (see docs/vps_runbook.md).
+    _dev_port = int(os.environ.get("FLASK_DEV_PORT", "5000"))
+    app.run(host="0.0.0.0", port=_dev_port, debug=False)

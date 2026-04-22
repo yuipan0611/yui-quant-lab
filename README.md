@@ -48,6 +48,9 @@ flowchart TB
 ```
 yui-quant-lab/
 ├── README.md
+├── deploy/
+│   ├── yui-quant-lab.service   # systemd 範本（Gunicorn，workers=1）
+│   └── nginx-yui-quant-lab.conf
 ├── docs/
 │   ├── architecture.md   # 系統架構與資料流
 │   ├── modules.md        # 各模組職責與介面
@@ -71,23 +74,60 @@ yui-quant-lab/
 
 ## 快速開始
 
-本機啟動 HTTP 服務（預設 `0.0.0.0:5000`）：
+本機啟動 HTTP 服務（預設 `0.0.0.0:5000`；可用環境變數 `FLASK_DEV_PORT` 覆寫。**正式 VPS** 請用 Nginx + Gunicorn + systemd，見 [docs/vps_runbook.md](docs/vps_runbook.md)）：
 
 ```bash
 python app.py
 ```
 
 - `GET /health`：健康檢查  
-- `POST /webhook`：接收 JSON alert，處理順序如下：  
-  1. 驗證 payload + 產生 `request_id`  
-  2. raw signal log  
-  3. `load_state` + `reset_state_if_new_day` + `evaluate_state_gate`  
-  4. 決策（gate fail 則直接 `SKIP`）  
-  5. `CHASE/RETEST` 產生 `order_command.json`（成功後建立 execution lifecycle；可選帶 `broker` 指定券商桶，預設 `single_broker`）  
-  6. `apply_decision_effects` + `save_state`  
-  7. decision log（含 before/after state）+ Telegram notify
-- `POST /fill-result`：接收真實成交結果（必填 `pnl`；並至少提供 `request_id` / `broker_order_id` / `client_order_id` 其中之一），更新 `today_realized_pnl`（並同步舊欄位 `today_loss`）、`consecutive_loss`、`cooldown_until`、`regime`；建議同送 `broker` + `broker_order_id` 以便掛回正確券商桶。可選 `fill_id`、`filled_qty`、`avg_fill_price`。去重優先使用 `fill_id`，否則退回 `request_id`（`applied: false`）。並嘗試把 fill 掛回 `output/orders/<request_id>.json` lifecycle（找不到則記 `fill_unlinked`）。
-- `POST /order-event`：執行端回報（必填 `request_id` + `event_type` + `broker`），更新該券商桶下的 lifecycle（例如 `order_acknowledged` / `order_rejected`）。
+- `POST /webhook`：接收 JSON alert；步驟與分支見下方 **Mermaid 流程圖**（與 Phase 3 的 `/tv-webhook` 為同一套決策管線時可對照）。
+- `POST /fill-result`：必填 `pnl`，且至少提供 `request_id` / `broker_order_id` / `client_order_id` 其中之一；更新 `today_realized_pnl`（並同步舊欄位 `today_loss`）、`consecutive_loss`、`cooldown_until`、`regime`。建議同送 `broker` + `broker_order_id` 以便掛回正確券商桶。可選 `fill_id`、`filled_qty`、`avg_fill_price`；去重優先 `fill_id`，否則 `request_id`（重複則 `applied: false`）。會嘗試把 fill 掛回 `output/orders/<request_id>.json` lifecycle（找不到則記 `fill_unlinked`）。流程見下方圖。
+- `POST /order-event`：必填 `request_id` + `event_type` + `broker`，更新該券商桶下 lifecycle（例如 `order_acknowledged` / `order_rejected`）。流程見下方圖。
+
+#### `POST /webhook` 管線（Mermaid）
+
+```mermaid
+flowchart TD
+  A["POST /webhook"] --> B["驗證 payload、產生 request_id"]
+  B --> C["raw signal log"]
+  C --> D["load_state"]
+  D --> E["reset_state_if_new_day"]
+  E --> F["evaluate_state_gate"]
+  F --> G{gate 通過?}
+  G -->|否| H["決策 SKIP（風控）"]
+  G -->|是| I["decide_trade"]
+  I --> J{CHASE 或 RETEST?}
+  J -->|是| K["write_order_command + lifecycle"]
+  J -->|否 SKIP| L["無新指令檔"]
+  H --> M["apply_decision_effects"]
+  K --> M
+  L --> M
+  M --> N["save_state"]
+  N --> O["decision log 含 state 前後快照"]
+  O --> P["Telegram notify（失敗不阻斷 HTTP）"]
+```
+
+#### `POST /fill-result` 管線（Mermaid）
+
+```mermaid
+flowchart TD
+  A["POST /fill-result"] --> B{"去重: fill_id 或 request_id"}
+  B -->|已處理| Z["回應 applied: false"]
+  B -->|新事件| C["累加 today_realized_pnl、更新 consecutive_loss 等"]
+  C --> D["record_fill_processed"]
+  D --> E["嘗試掛回 output/orders  lifecycle"]
+  E --> F["save_state、選擇性通知"]
+```
+
+#### `POST /order-event` 管線（Mermaid）
+
+```mermaid
+flowchart TD
+  A["POST /order-event"] --> B["驗證 request_id、event_type、broker"]
+  B --> C["apply_order_event 寫入該券商桶 lifecycle"]
+  C --> D["execution_events.jsonl 流水"]
+```
 
 `request_id` 格式：`YYYYMMDDTHHMMSS_xxxxxx`（例如 `20260419T103012_ab12cd`）。
 時間欄位統一採台北時區 ISO8601（`+08:00`）。
@@ -123,6 +163,12 @@ PowerShell 可改用：`$env:ENABLE_TELEGRAM_NOTIFY="true"`（並確認已設定
 powershell -ExecutionPolicy Bypass -File scripts/setup_env.ps1
 ```
 
+一鍵重跑「TradingView -> Flask -> Telegram」本機鏈路驗證：
+
+```bash
+python scripts/run_live_chain_check.py
+```
+
 ### State 欄位語意（本版）
 
 - `today_realized_pnl`：**當日已實現損益累加值**（有號數；獲利為正、虧損為負），由 `/fill-result` 的 `pnl` 累加而來。  
@@ -136,9 +182,22 @@ Lifecycle 儲存：`output/orders/<request_id>.json`；事件流水：`output/ex
 
 ## Phase 3: End-to-End Verified
 
-**目標**：TradingView → VPS（Flask，`/tv-webhook`）→ decision engine → `output/signal_log.jsonl` → Telegram，單筆 alert 可重現驗收。
+**目標**：TradingView → VPS（**Nginx:80 → Gunicorn:8000 →** Flask `/tv-webhook`）→ decision engine → `output/signal_log.jsonl` → Telegram，單筆 alert 可重現驗收。
 
-- **Webhook URL（HTTP、port 80）**：`http://<VPS公網IP>/tv-webhook`（TradingView 僅允許 80/443；本專案 VPS 驗證為 **80**。）
+#### Phase 3 部署路徑（Mermaid）
+
+```mermaid
+flowchart LR
+  TV["TradingView Alert"] --> NX["Nginx :80/443"]
+  NX --> GU["Gunicorn :8000"]
+  GU --> FL["Flask /tv-webhook"]
+  FL --> SM["State + Gate"]
+  SM --> DE["Decision Engine"]
+  DE --> CW["CommandWriter / JSONL"]
+  DE --> TG["Telegram"]
+```
+
+- **Webhook URL（HTTP、port 80）**：`http://<VPS公網IP>/tv-webhook`（TradingView 僅允許 80/443；由 **Nginx** 對外聽 **80** 再轉發至本機 Gunicorn。）
 - **TradingView Alert message（最小 JSON 範例）**：
 
 ```json

@@ -12,6 +12,7 @@ env/
 .env
 .env.*
 !.env.example
+.mcp.json
 
 # Runtime outputs (local runs; not versioned)
 output/*

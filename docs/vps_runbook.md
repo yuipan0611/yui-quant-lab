@@ -1,114 +1,122 @@
 # VPS Runbook（yui-quant-lab / Ubuntu 24.04）
 
-本文件目標：讓你在 VPS 上能用「最少指令」完成啟動、驗收、重啟、看 log、清 log。  
-本文件刻意不包含 nginx / HTTPS / domain / Docker / systemd。
+目標：在 Hostinger VPS 上以 **Nginx（80）→ Gunicorn（127.0.0.1:8000）→ Flask** 常駐運行，並用 **systemd** 開機自啟、崩潰重啟；環境變數**只**由專案根目錄的 `.env` 經 **python-dotenv** 載入（**勿**在 systemd 裡再用 `EnvironmentFile` 重複注入同一批 secret）。
 
-## 0) 角色分工
+---
 
-- 本機：開發、測試、Git 版本管理
-- VPS：部署驗證、長時間運行
+## 0) 架構（正式）
 
-## 1) 專案位置與 venv
+| 元件 | 角色 |
+|------|------|
+| **Nginx** | 對外聽 **80**（之後可加 443）；`client_max_body_size` 避免 JSON 被 413 擋下；反向代理到本機 Gunicorn。 |
+| **Gunicorn** | WSGI；**固定 `--workers 1`**（`output/state.json`、JSONL 為檔案型，多 worker 會並發寫入競態）。 |
+| **Flask（app.py）** | `/health`、`/tv-webhook` 等；啟動時 `load_dotenv(.env)`。 |
+| **systemd** | 管理 Gunicorn 行程、`journalctl` 看 stdout/stderr（含 **raw_request** 除錯列）。 |
 
-你目前實際路徑範例（依你機器為準）：
+Repo 範本：
+
+- [`deploy/yui-quant-lab.service`](../deploy/yui-quant-lab.service)
+- [`deploy/nginx-yui-quant-lab.conf`](../deploy/nginx-yui-quant-lab.conf)
+- [`deploy/nginx-yui-quant-lab-zones.conf`](../deploy/nginx-yui-quant-lab-zones.conf)（`limit_req_zone`，需放在 `http` 層）
+
+---
+
+## 1) 專案目錄與 venv
 
 ```bash
 cd ~/yui-quant-lab
 pwd
-```
-
-啟用 venv：
-
-```bash
+python3 -m venv .venv
 source .venv/bin/activate
-which python
-python -c "import sys; print(sys.executable)"
-```
-
-合格判斷：
-
-- `which python` 應指向 `.../yui-quant-lab/.venv/bin/python`
-
-安裝依賴（首次或 requirements 變更後）：
-
-```bash
+pip install -U pip
 pip install -r requirements.txt
 ```
 
-## 2) 環境變數（`.env`）
+---
 
-在專案根目錄建立 `.env`（不要提交到 Git）：
+## 2) 環境變數（唯一來源：`.env`）
 
 ```bash
 cd ~/yui-quant-lab
 cp .env.example .env
+chmod 600 .env
 nano .env
 ```
 
-至少需要：
+至少：`TV_WEBHOOK_SECRET`、`ENABLE_TELEGRAM_NOTIFY`（若要真送）、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`。
 
-- `TV_WEBHOOK_SECRET`：TradingView alert JSON 內 `secret` 欄位要一致
-- `ENABLE_TELEGRAM_NOTIFY=true`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
+**systemd**：`WorkingDirectory` 必須是專案根（與 `.env` 同目錄），**不要**在 unit 裡加 `EnvironmentFile=`。
 
-備份 `.env`（建議每次大改前做一次）：
+備份：
 
 ```bash
 cp .env ".env.backup.$(date +%Y%m%d_%H%M%S)"
 ```
 
-## 3) 啟動 app（port 80 + debug 關）
+---
 
-確認 `app.py` 最後啟動段為：
+## 3) systemd（Gunicorn）
 
-- `host="0.0.0.0"`
-- `port=80`
-- `debug=False`
+1. 複製範本並把 `CHANGEME` 改成你的 Linux 使用者與路徑：
 
-啟動（背景 + log）：
+   ```bash
+   sudo cp deploy/yui-quant-lab.service /etc/systemd/system/yui-quant-lab.service
+   sudo nano /etc/systemd/system/yui-quant-lab.service
+   ```
 
-```bash
-cd ~/yui-quant-lab
-source .venv/bin/activate
-nohup ./.venv/bin/python app.py > app.log 2>&1 &
-```
+2. 啟用並啟動：
 
-停止：
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now yui-quant-lab.service
+   sudo systemctl status yui-quant-lab.service --no-pager
+   ```
 
-```bash
-pkill -f "python app.py"
-```
+3. 日誌（含 Gunicorn access、應用 `print`、**raw_request** JSON 行）：
 
-重啟（一鍵）：
+   ```bash
+   journalctl -u yui-quant-lab.service -n 200 --no-pager
+   journalctl -u yui-quant-lab.service -f
+   ```
 
-```bash
-cd ~/yui-quant-lab
-source .venv/bin/activate
-pkill -f "python app.py"; nohup ./.venv/bin/python app.py > app.log 2>&1 &
-```
+**`--workers 1`**：必須保留；多 worker 可能同時改寫 `output/state.json` 與日誌檔，造成難以重現的錯誤。
 
-確認程序存在：
+---
 
-```bash
-ps -ef | grep "python app.py" | grep -v grep
-```
+## 4) Nginx
 
-確認監聽 port（應看到 `:80`）：
+**兩步驟（順序重要）**：先把 `limit_req_zone` 放到 `conf.d`，再啟用 site。
 
 ```bash
-ss -ltnp | grep -E ":80|:5000"
+sudo cp deploy/nginx-yui-quant-lab-zones.conf /etc/nginx/conf.d/yui-quant-lab-zones.conf
+sudo cp deploy/nginx-yui-quant-lab.conf /etc/nginx/sites-available/yui-quant-lab
+sudo ln -sf /etc/nginx/sites-available/yui-quant-lab /etc/nginx/sites-enabled/yui-quant-lab
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-## 4) 最小驗收（TradingView 限制：80/443）
+`client_max_body_size 256k` 可依需求改大（例如 `1m`）。過大請求會回 **413**，可用於驗證此設定是否生效。
 
-健康檢查：
+**Rate limit 驗收（可選）**：對 `/tv-webhook` 連續大量 `curl`，預期可能出現 **503**（burst 與漏桶排隊耗盡時）；正常單次 alert 不應被擋。
+
+**stdout raw_request**：可在 `.env` 設定 `RAW_REQUEST_LOG_MODE=metadata_only`（只記路徑/IP/長度）或 `off`（完全不印 raw_request），降低 `journalctl` 體積。
+
+---
+
+## 5) 最小驗收（curl）
+
+經 **Nginx → Gunicorn**（本機）：
 
 ```bash
-curl http://127.0.0.1/health
+curl -sS http://127.0.0.1/health
 ```
 
-`tv-webhook`（建議用 Python 讀 `.env`，避免 shell 跳脫問題）：
+只測 Gunicorn（繞過 Nginx）：
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+```
+
+`tv-webhook`（建議用 Python 讀 `.env`，避免 shell 轉義弄壞 `secret`）：
 
 ```bash
 cd ~/yui-quant-lab
@@ -117,25 +125,39 @@ source .venv/bin/activate
 TVS=$(python -c "from dotenv import dotenv_values; print(dotenv_values('.env').get('TV_WEBHOOK_SECRET',''))")
 BODY="{\"secret\":\"$TVS\",\"symbol\":\"MNQ\",\"signal\":\"long_breakout\",\"price\":19010,\"breakout_level\":18990,\"delta_strength\":0.92}"
 
-printf '%s\n' "$BODY" | python -m json.tool
-
-curl -X POST http://127.0.0.1/tv-webhook \
+curl -sS -X POST http://127.0.0.1/tv-webhook \
   -H "Content-Type: application/json" \
   -d "$BODY"
 ```
 
-預期：
+預期：HTTP **200**，JSON 內 `ok: true`。同時在 `journalctl -u yui-quant-lab -f` 可看到一行 **`"event":"raw_request"`**（`/tv-webhook` 的 `body_preview` 內 `secret` 已遮罩；若 `RAW_REQUEST_LOG_MODE=metadata_only` 則不會有 `body_preview`）。
 
-- HTTP 200
-- JSON 內 `ok: true`
+**Webhook 短時去重**：用同一個 `BODY` 連送兩次 `POST /tv-webhook`，第二次預期仍 **200**，但 JSON 內 `duplicate: true`（且 `output/signal_log.jsonl` 不應再出現一組新的決策鏈）。去重狀態檔：`output/webhook_dedupe.json`（已被 `.gitignore` 忽略）。
 
-從**另一台電腦**對外公網驗證（把 `<PUBLIC_IP>` 換成 VPS IP）：
+對外公網（另一台機器）：
 
 ```bash
-curl http://<PUBLIC_IP>/health
+curl -sS http://<PUBLIC_IP>/health
 ```
 
-## 5) Telegram 最小驗收
+TradingView 僅允許 **80/443**；URL 形如 `http://<PUBLIC_IP>/tv-webhook`。
+
+---
+
+## 6) 端到端驗收（分層）
+
+| 層級 | 驗什麼 | 怎麼驗 |
+|------|--------|--------|
+| **TradingView** | 真 alert 打到對外 URL | TV 後台 webhook delivery / 重送；URL `http://<IP或網域>/tv-webhook`。 |
+| **Nginx** | 80 轉發、body 上限 | `curl -i http://127.0.0.1/health`；`sudo nginx -t`；`/var/log/nginx/error.log`；故意送超大 body 看 **413**。 |
+| **Gunicorn** | 聽 8000、單 worker | `curl http://127.0.0.1:8000/health`；`ss -ltnp` 看 `8000`；行程應符合 **workers=1**。 |
+| **Flask** | 路由、secret、raw log | 上一節 `curl`；`journalctl -u yui-quant-lab -f` 看 **raw_request** 與錯誤訊息。 |
+| **JSONL** | 決策鏈寫入 | `tail -f output/signal_log.jsonl`；同一 `request_id`：`tv_webhook_received` → `decision_result` 等。 |
+| **Telegram** | 通知、失敗不擋 HTTP | 客戶端是否收到；API 失敗時仍應 HTTP 200；可選 `python scripts/run_telegram_decision_smoke.py telegram`。 |
+
+---
+
+## 7) Telegram 最小驗收
 
 ```bash
 cd ~/yui-quant-lab
@@ -143,64 +165,81 @@ source .venv/bin/activate
 python scripts/run_telegram_decision_smoke.py telegram
 ```
 
-預期：
+---
 
-- `ok: True`
-- `status_code: 200`
-- `mode: telegram`
+## 8) 本機一鍵鏈路（可選）
 
-## 6) 看 log（兩條線）
-
-應用 stdout/stderr：
+專案根目錄、**服務已在本機或 VPS 上跑**（預設打 `http://127.0.0.1`，即 Nginx 的 80）：
 
 ```bash
-tail -n 80 app.log
-tail -f app.log
+python scripts/run_live_chain_check.py
 ```
 
-業務事件 JSONL：
+若只跑 `python app.py`（預設 **5000**），請先匯出：
 
 ```bash
-tail -n 20 output/signal_log.jsonl
+export WEBHOOK_BASE_URL=http://127.0.0.1:5000
+python scripts/run_live_chain_check.py
 ```
 
-## 7) 清 log（最小：truncate）
+---
+
+## 9) 業務日誌（JSONL）
+
+```bash
+tail -n 30 output/signal_log.jsonl
+tail -f output/signal_log.jsonl
+```
+
+---
+
+## 10) 緊急除錯（非正式）
+
+僅供臨時本機／排錯，**不要**當正式上線方式：
 
 ```bash
 cd ~/yui-quant-lab
-ls -lh app.log
-truncate -s 0 app.log
-
-ls -lh output/signal_log.jsonl
-truncate -s 0 output/signal_log.jsonl
+source .venv/bin/activate
+export FLASK_DEV_PORT=5000
+python app.py
 ```
 
-## 8) 常見問題（最短排查）
+正式環境請始終使用 **systemd + Gunicorn + Nginx**。
+
+---
+
+## 11) 常見問題
 
 ### A) `curl http://127.0.0.1/health` 連不上
 
 ```bash
-ss -ltnp | grep -E ":80|:5000"
-tail -n 80 app.log
+systemctl is-active yui-quant-lab.service
+systemctl is-active nginx
+ss -ltnp | head
+journalctl -u yui-quant-lab.service -n 80 --no-pager
+sudo tail -n 50 /var/log/nginx/error.log
 ```
 
-### B) `tv-webhook` 回 `invalid_secret`
+### B) `invalid_secret`
 
-代表 TradingView JSON 的 `secret` 與 `.env` 的 `TV_WEBHOOK_SECRET` 不一致。
+TradingView JSON 的 `secret` 與 `.env` 的 `TV_WEBHOOK_SECRET` 不一致。
 
-### C) `tv-webhook` 回 `bad_payload`
+### C) `bad_payload`
 
-常見原因：
+- 未帶 `Content-Type: application/json`
+- 內容不是合法 JSON 物件
 
-- 沒有 `Content-Type: application/json`
-- JSON 不是合法物件（可用 `python -m json.tool` 先驗證）
+### D) 413 Request Entity Too Large
 
-### D) 你用 `grep/cut` 讀 secret 造成 JSON 壞掉
+Nginx `client_max_body_size` 過小；調大後 `nginx -t` 並 `reload`。
 
-改用本文件的 Python 讀法（第 4 節）。
+---
 
-## 9) Rollback（最小）
+## 12) Rollback（最小）
 
-- 停服務：`pkill -f "python app.py"`
-- 還原 `.env`：把備份檔改回 `.env`
-- 還原程式：用 Git 回到上一個可用 commit（本機操作後再同步到 VPS）
+```bash
+sudo systemctl stop yui-quant-lab.service
+sudo systemctl disable yui-quant-lab.service
+```
+
+還原 `.env`、程式用 Git；必要時移除 `sites-enabled` 裡的 site 連結後 `nginx -t && reload`。
