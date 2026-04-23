@@ -57,7 +57,8 @@ yui-quant-lab/
 │   ├── architecture.md   # 系統架構與資料流
 │   ├── decision_architecture_preview.md  # 決策流程預覽圖與核心規則摘要
 │   ├── modules.md        # 各模組職責與介面
-│   └── roadmap.md        # 開發進度與下一步
+│   ├── roadmap.md        # 開發進度與下一步
+│   └── vps_acceptance_runbook.md # VPS 完整驗收流程與異常定位
 ├── decision_engine.py    # CHASE / RETEST / SKIP 決策
 ├── state_manager.py      # 狀態載入/保存、跨日 reset、風控 gate
 ├── execution_tracker.py  # 訂單 lifecycle（檔案型）與 execution 事件 JSONL
@@ -298,6 +299,46 @@ flowchart LR
 
 更完整的欄位說明、排錯與單筆真 alert 驗收清單見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)；VPS 啟動與 `curl` 驗收指令見 [docs/vps_runbook.md](docs/vps_runbook.md)。
 
+## VPS 例行驗收（精簡版）
+
+完整驗收表與異常快速定位請看 [docs/vps_acceptance_runbook.md](docs/vps_acceptance_runbook.md)。
+
+### 最小 4 步（部署後必跑）
+
+1) 服務與 Port
+
+```bash
+sudo systemctl is-active yui-quant-lab.service
+sudo systemctl is-active nginx
+ss -ltnp | grep -E ':8000|:80'
+```
+
+2) 健康檢查（內網 + 公網）
+
+```bash
+curl -i http://127.0.0.1/health
+curl -i http://127.0.0.1:8000/health
+curl -i http://<VPS_PUBLIC_IP>/health
+```
+
+3) `/tv-webhook` 基本驗收
+
+```bash
+cd ~/yui-quant-lab
+source .venv/bin/activate
+TVS=$(python -c "from dotenv import dotenv_values; print(dotenv_values('.env').get('TV_WEBHOOK_SECRET',''))")
+curl -i -X POST http://127.0.0.1/tv-webhook \
+  -H "Content-Type: application/json" \
+  -d "{\"secret\":\"$TVS\",\"symbol\":\"MNQ\",\"signal\":\"long_breakout\",\"price\":20150,\"breakout_level\":20145,\"delta_strength\":0.88}"
+```
+
+4) 決策落地檢查
+
+```bash
+cd ~/yui-quant-lab
+tail -n 20 output/signal_log.jsonl
+```
+
 ### Fixture 重播與 E2E
 
 ```bash
@@ -317,7 +358,7 @@ python decision_engine.py
 
 ## 文件
 
-詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/decision_architecture_preview.md](docs/decision_architecture_preview.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）；Phase 3 與 VPS 操作另見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)、[docs/vps_runbook.md](docs/vps_runbook.md)。
+詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/decision_architecture_preview.md](docs/decision_architecture_preview.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）；Phase 3 與 VPS 操作另見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)、[docs/vps_runbook.md](docs/vps_runbook.md)、[docs/vps_acceptance_runbook.md](docs/vps_acceptance_runbook.md)。
 
 ## 測試
 
