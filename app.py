@@ -111,6 +111,50 @@ def _new_request_id() -> str:
     return f"{ts}_{uuid4().hex[:6]}"
 
 
+def _derive_duplicate_branch(signal: object) -> str:
+    signal_s = str(signal).strip().lower() if signal is not None else ""
+    if signal_s == "long_breakout":
+        return "LONG"
+    if signal_s == "short_breakout":
+        return "SHORT"
+    return "UNKNOWN"
+
+
+def _build_duplicate_synthetic_response(
+    *,
+    payload: dict,
+    fingerprint: str,
+    message: str,
+    include_tv_compat: bool = False,
+) -> dict:
+    branch = _derive_duplicate_branch(payload.get("signal"))
+    synthetic_request_id = f"dup_{fingerprint[:12]}"
+    trace = {
+        "decision": "SKIP",
+        "reason_code": "DUPLICATE_IGNORED",
+        "branch": branch,
+        "duplicate": True,
+        "timestamp": iso_now_taipei(),
+        "inputs": {
+            "signal": payload.get("signal"),
+            "regime": payload.get("regime"),
+        },
+    }
+    response = {
+        "status": "duplicate_ignored",
+        "message": message,
+        "decision": "SKIP",
+        "reason_code": "DUPLICATE_IGNORED",
+        "branch": branch,
+        "request_id": synthetic_request_id,
+        "trace": trace,
+    }
+    if include_tv_compat:
+        response["ok"] = True
+        response["duplicate"] = True
+    return response
+
+
 def _json_error(message: str, status_code: int = 400, **extra: object):
     payload = {"status": "error", "message": message}
     payload.update(extra)
@@ -426,10 +470,11 @@ def webhook():
             }
         )
         return jsonify(
-            {
-                "status": "duplicate_ignored",
-                "message": "Same webhook payload was recently processed; ignored for idempotency.",
-            }
+            _build_duplicate_synthetic_response(
+                payload=payload,
+                fingerprint=fp,
+                message="Same webhook payload was recently processed; ignored for idempotency.",
+            )
         ), 200
 
     request_id = _new_request_id()
@@ -483,11 +528,12 @@ def tv_webhook():
             }
         )
         return jsonify(
-            {
-                "ok": True,
-                "duplicate": True,
-                "message": "Same tv-webhook payload was recently processed; ignored for idempotency.",
-            }
+            _build_duplicate_synthetic_response(
+                payload=body,
+                fingerprint=fp,
+                message="Same tv-webhook payload was recently processed; ignored for idempotency.",
+                include_tv_compat=True,
+            )
         ), 200
 
     request_id = _new_request_id()
