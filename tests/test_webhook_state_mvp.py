@@ -14,6 +14,7 @@ import command_writer
 import execution_tracker
 import state_manager
 import telegram_bot as tg_module
+import webhook_dedupe as webhook_dedupe_module
 from state_manager import _default_state
 from time_utils import now_taipei
 
@@ -43,9 +44,16 @@ class WebhookStateMVPTests(unittest.TestCase):
         app_module.notify_decision = self.notify_mock
         app_module.notify_fill_result = self.fill_notify_mock
 
+        self.dedupe_path = self.output_dir / "webhook_dedupe.json"
+        self.env_patch = patch.dict(os.environ, {"WEBHOOK_DEDUPE_PATH": str(self.dedupe_path)}, clear=False)
+        self.env_patch.start()
+        webhook_dedupe_module.get_dedupe_path.cache_clear()
+
         self.client = app_module.app.test_client()
 
     def tearDown(self) -> None:
+        self.env_patch.stop()
+        webhook_dedupe_module.get_dedupe_path.cache_clear()
         app_module.notify_decision = tg_module.notify_decision
         app_module.notify_fill_result = tg_module.notify_fill_result
         self.tmp_dir.cleanup()
@@ -114,6 +122,50 @@ class WebhookStateMVPTests(unittest.TestCase):
         self.assertIsInstance(tr, dict)
         assert isinstance(tr, dict)
         self.assertEqual(tr.get("reason_code"), "STATE_GATE")
+
+    def test_webhook_duplicate_returns_minimal_consistent_schema(self) -> None:
+        payload = self._payload()
+        first = self.client.post("/webhook", json=payload)
+        self.assertEqual(first.status_code, 200)
+        first_body = first.get_json()
+        assert isinstance(first_body, dict)
+        self.assertEqual(first_body.get("status"), "success")
+
+        second = self.client.post("/webhook", json=payload)
+        self.assertEqual(second.status_code, 200)
+        body = second.get_json()
+        assert isinstance(body, dict)
+
+        for key in ("status", "decision", "reason_code", "branch", "request_id", "trace"):
+            self.assertIn(key, body)
+        self.assertEqual(body.get("status"), "duplicate_ignored")
+        self.assertEqual(body.get("decision"), "SKIP")
+        self.assertEqual(body.get("reason_code"), "DUPLICATE_IGNORED")
+        self.assertEqual(body.get("branch"), "LONG")
+        self.assertRegex(str(body.get("request_id")), r"^dup_[0-9a-f]{12}$")
+
+        tr = body.get("trace")
+        assert isinstance(tr, dict)
+        self.assertTrue(tr.get("duplicate"))
+        self.assertEqual(tr.get("decision"), "SKIP")
+        self.assertEqual(tr.get("reason_code"), "DUPLICATE_IGNORED")
+        self.assertEqual(tr.get("branch"), "LONG")
+        self.assertIn("timestamp", tr)
+        inputs = tr.get("inputs")
+        assert isinstance(inputs, dict)
+        self.assertEqual(set(inputs.keys()), {"signal", "regime"})
+        self.assertEqual(inputs.get("signal"), "long_breakout")
+        self.assertIsNone(inputs.get("regime"))
+
+    def test_webhook_duplicate_branch_unknown_for_non_breakout_signal(self) -> None:
+        payload = self._payload()
+        payload["signal"] = "sideways_probe"
+        self.assertEqual(self.client.post("/webhook", json=payload).status_code, 200)
+        resp = self.client.post("/webhook", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        assert isinstance(body, dict)
+        self.assertEqual(body.get("branch"), "UNKNOWN")
 
     def test_notify_decision_send_failure_does_not_break_webhook(self) -> None:
         state_manager.save_state(_default_state())

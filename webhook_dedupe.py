@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -99,9 +100,17 @@ def fingerprint_for(endpoint: str, payload: dict) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _dedupe_path() -> Path:
+@lru_cache(maxsize=1)
+def get_dedupe_path() -> Path:
+    raw = os.environ.get("WEBHOOK_DEDUPE_PATH")
     root = Path(__file__).resolve().parent
+    if raw is not None and str(raw).strip():
+        return Path(str(raw).strip())
     return root / "output" / "webhook_dedupe.json"
+
+
+def _dedupe_path() -> Path:
+    return get_dedupe_path()
 
 
 def _ttl_seconds() -> int:
