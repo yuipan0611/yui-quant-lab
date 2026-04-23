@@ -6,6 +6,8 @@ Breakout 訊號與 GEX 脈絡下的輕量決策實驗室：接收外部 alert、
 
 - **狀態與風控**：`state_manager` 載入／儲存、`reset_state_if_new_day`、`evaluate_state_gate`；決策日誌含 `state_snapshot_before` / `after`。
 - **HTTP**：`/webhook` 走完整管線；`/fill-result` 回填損益與連虧計數；`/order-event` 更新檔案型訂單 lifecycle（`execution_tracker`）。
+- **決策 trace**：`decision_engine` 新增 gate/threshold/summary 診斷欄位（如 `gates`、`thresholds`、`compact_summary`），並統一浮點顯示格式，方便除錯與回放比對。
+- **輸入健壯性**：`signal` 先做正規化（去空白、轉小寫）再進入規則判斷，減少來源格式差異造成的誤判。
 - **通知**：Telegram 僅針對決策結果，可環境變數切換真送或 stdout，失敗不阻斷 webhook。
 - **驗證**：`tests/` 涵蓋 webhook、邊界、`replay`／e2e；`fixtures/` 供 `replay.py` 批次重播。
 
@@ -53,6 +55,7 @@ yui-quant-lab/
 │   └── nginx-yui-quant-lab.conf
 ├── docs/
 │   ├── architecture.md   # 系統架構與資料流
+│   ├── decision_architecture_preview.md  # 決策流程預覽圖與核心規則摘要
 │   ├── modules.md        # 各模組職責與介面
 │   └── roadmap.md        # 開發進度與下一步
 ├── decision_engine.py    # CHASE / RETEST / SKIP 決策
@@ -180,6 +183,82 @@ Lifecycle 儲存：`output/orders/<request_id>.json`；事件流水：`output/ex
 
 上述路徑與本機 `state.json` 等執行期產物，預設由 `.gitignore`（`output/*` + `!output/.gitkeep`）排除，避免把實驗流水推上遠端。若你的 repo 曾經追蹤過 `output/*.json`，請在本機確認是否要用 `git rm --cached` 停止追蹤（避免之後誤提交）。
 
+## State Gate & Cooldown Design
+
+### 1. 概念總覽
+
+本系統將「策略決策」與「執行風控」分層處理：
+
+- `decision_engine`：負責市場條件判斷（例如 `CHASE` / `RETEST` / `SKIP`）。
+- `state gate`：負責執行層風控，決定最終是否允許下單。
+
+即使 `decision_engine` 判斷可交易，仍可能被 `state gate` 拒單。
+
+### 2. Hard Locks vs Soft Flags
+
+本節定義目標狀態模型：以 Hard Locks / Soft Flags 分離執行風控語意。
+
+> 實作現況（MVP）：目前 state schema 仍保留 `lock_reason` 相容欄位，state gate 拒單條件已落地 `cooldown_active`；其餘 Hard Locks 與 Soft Flags 為規格保留項，後續版本逐步實作。
+
+#### Hard Locks（會拒單）
+
+代表強制風控條件；任一條件成立即拒單：
+
+- `cooldown_active`
+- `manual_lock`
+- `daily_max_loss`
+- `loss_streak_lock`
+- `account_locked`
+- `prop_rule_violation`
+
+#### Soft Flags（不拒單）
+
+僅供提示與分析，不直接影響下單：
+
+- `high_vol`
+- `news_event`
+- `low_liquidity`
+- `warning_only`
+
+`state gate` 僅依據 Hard Locks 判斷是否拒單。
+
+### 3. Cooldown 設計
+
+`cooldown_active` 為時間型 Hard Lock，用於短時間暫停交易。
+
+設計原則摘要：
+
+- 避免使用單純 boolean（降低長期鎖定風險）。
+- 採用時間驅動，明確定義解除時點。
+
+```python
+cooldown_until = now + timedelta(minutes=N)
+```
+
+### Enforcement Rules
+
+- `decision_engine` 不得直接依賴或修改 state gate 的 Hard Locks / Soft Flags。
+- `state gate` 不得重寫或覆蓋 `decision_engine` 的策略判斷邏輯。
+- Hard Locks 必須明確列舉，不得使用模糊條件（例如：非空即判斷）。
+- Soft Flags 不得影響最終是否下單。
+- cooldown 必須以時間（`cooldown_until`）為唯一判斷來源，不得使用長期 boolean 狀態。
+
+### Invariants
+
+以下條件在任何情況下必須成立：
+
+- 存在 Hard Lock 時，最終決策必須為拒單（`SKIP` / `STATE_GATE`）。
+- 不存在 Hard Lock 時，state gate 不得拒單。
+- `cooldown_active` 僅由 `now < cooldown_until` 推導，不可手動長期設為 `true`。
+- duplicate request 的處理不得影響 state gate 判斷結果。
+
+### Change Policy
+
+- 所有涉及 state gate 行為的修改，必須同步更新本文件。
+- 若程式碼與本文件語義不一致，以本文件為準。
+
+本節為 state gate 行為的標準語義定義；任何設計變更皆需同步檢視並更新本節內容。
+
 ## Phase 3: End-to-End Verified
 
 **目標**：TradingView → VPS（**Nginx:80 → Gunicorn:8000 →** Flask `/tv-webhook`）→ decision engine → `output/signal_log.jsonl` → Telegram，單筆 alert 可重現驗收。
@@ -238,7 +317,7 @@ python decision_engine.py
 
 ## 文件
 
-詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）；Phase 3 與 VPS 操作另見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)、[docs/vps_runbook.md](docs/vps_runbook.md)。
+詳細說明請見 [docs/architecture.md](docs/architecture.md)、[docs/decision_architecture_preview.md](docs/decision_architecture_preview.md)、[docs/modules.md](docs/modules.md)、[docs/roadmap.md](docs/roadmap.md)、[docs/strategy_spec_v1.md](docs/strategy_spec_v1.md)（策略欄位與行為規格草稿）；Phase 3 與 VPS 操作另見 [docs/phase3_tradingview_e2e.md](docs/phase3_tradingview_e2e.md)、[docs/vps_runbook.md](docs/vps_runbook.md)。
 
 ## 測試
 

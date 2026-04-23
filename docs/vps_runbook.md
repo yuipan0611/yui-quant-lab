@@ -193,6 +193,33 @@ tail -f output/signal_log.jsonl
 
 ---
 
+## 9.1) Trace 欄位語義（decision_result）
+
+`output/signal_log.jsonl` 的 `decision_result.trace` 建議用以下層級解讀：
+
+- `decision`：最終動作（`CHASE` / `RETEST` / `SKIP`）
+- `reason_code`：穩定機器 key（供程式與告警規則判讀）
+- `branch`：最終命中路徑（`LONG` / `SHORT` / `NONE`）
+- `gates`：條件快照（debug 用，反映當下條件狀態，不是最終裁決）
+- `compact_summary`：單行 debug convenience，非正式 API 契約
+
+請以 `branch + decision` 作為最終決策判讀主軸，`reason_code` 作為穩定機器鍵值。
+
+**注意**：`gates` 不保證能單獨推導最終 `decision`；最終決策以 `branch + decision` 為準。
+
+### Strategy Note：Room 條件行為
+
+目前策略在 room 不足時：
+
+- 不直接 `SKIP`
+- 而是降級為 `RETEST`
+
+這與某些直覺預期（room 不足 -> `SKIP`）不同，但屬於既有策略設計，非本次 trace 改動所造成。
+
+若未來需改為 `SKIP`，應作為獨立策略變更處理。
+
+---
+
 ## 10) 緊急除錯（非正式）
 
 僅供臨時本機／排錯，**不要**當正式上線方式：
