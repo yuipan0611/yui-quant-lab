@@ -8,6 +8,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from command_writer import SIGNAL_LOG_PATH
 from state_manager import load_state, reset_state_if_new_day
 
 TELEGRAM_API = "https://api.telegram.org"
+MANUAL_TRADE_LOCK_PATH = Path("output") / "manual_trade_lock.json"
 
 
 def _is_notify_enabled() -> bool:
@@ -114,7 +116,12 @@ def extract_update_fields(update: Any) -> dict[str, Any]:
     容錯抽取 Telegram Update 的 chat_id、text、update_type。
     非所有 update 都一定有 message.text。
     """
-    out: dict[str, Any] = {"update_type": None, "chat_id": None, "text": None}
+    out: dict[str, Any] = {
+        "update_type": None,
+        "chat_id": None,
+        "text": None,
+        "callback_query_id": None,
+    }
     if not isinstance(update, dict):
         return out
 
@@ -151,6 +158,11 @@ def extract_update_fields(update: Any) -> dict[str, Any]:
     cq = update.get("callback_query")
     if isinstance(cq, dict):
         out["update_type"] = "callback_query"
+        cqid = cq.get("id")
+        if isinstance(cqid, str):
+            out["callback_query_id"] = cqid.strip() or None
+        elif cqid is not None:
+            out["callback_query_id"] = str(cqid).strip() or None
         msg = cq.get("message")
         if isinstance(msg, dict):
             chat = msg.get("chat")
@@ -296,6 +308,175 @@ def format_help_message() -> str:
     )
 
 
+def build_main_menu_keyboard() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📊 狀態", "callback_data": "status"},
+                {"text": "📡 最新訊號", "callback_data": "last_signal"},
+            ],
+            [
+                {"text": "🧠 最新決策", "callback_data": "last_decision"},
+                {"text": "🧾 最新成交", "callback_data": "last_fill"},
+            ],
+            [
+                {"text": "🛡 風控", "callback_data": "risk"},
+                {"text": "🔒 鎖定交易", "callback_data": "lock_trading"},
+            ],
+            [
+                {"text": "🔓 解除鎖定", "callback_data": "unlock_trading"},
+                {"text": "❓ 幫助", "callback_data": "help"},
+            ],
+        ]
+    }
+
+
+def _manual_lock_payload(*, locked: bool, reason: str) -> dict[str, Any]:
+    return {
+        "locked": bool(locked),
+        "source": "telegram",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+    }
+
+
+def load_manual_trade_lock() -> dict[str, Any] | None:
+    try:
+        if not MANUAL_TRADE_LOCK_PATH.is_file():
+            return None
+        obj = json.loads(MANUAL_TRADE_LOCK_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def save_manual_trade_lock(locked: bool, reason: str) -> bool:
+    payload = _manual_lock_payload(locked=locked, reason=reason)
+    try:
+        MANUAL_TRADE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MANUAL_TRADE_LOCK_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _display_or_default(value: Any, default: str = "-") -> str:
+    if value is None:
+        return default
+    s = str(value).strip()
+    return s if s else default
+
+
+def _get_nested(data: Any, path: list[str], default: str = "-") -> str:
+    cur = data
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return _display_or_default(cur, default=default)
+
+
+def _get_first(data: Any, paths: list[list[str]], default: str = "-") -> str:
+    for path in paths:
+        val = _get_nested(data, path, default=default)
+        if val != default:
+            return val
+    return default
+
+
+def _format_last_event_by_type(event_type: str, title: str) -> str:
+    evt = tail_jsonl_find_last(
+        SIGNAL_LOG_PATH,
+        lambda o: o.get("event_type") == event_type,
+        max_lines=4096,
+    )
+    if not evt:
+        return f"{title}：目前沒有資料"
+    if event_type == "fill_result":
+        status = _get_first(
+            evt,
+            [
+                ["status"],
+                ["applied"],
+                ["result", "status"],
+                ["payload", "status"],
+                ["payload", "applied"],
+            ],
+        )
+        return "\n".join(
+            [
+                "[最新成交]",
+                f"時間：{_get_first(evt, [['timestamp'], ['payload', 'timestamp'], ['result', 'timestamp']])}",
+                f"Request ID：{_get_first(evt, [['request_id'], ['payload', 'request_id'], ['result', 'request_id']])}",
+                f"Status：{status}",
+                f"Symbol：{_get_first(evt, [['symbol'], ['payload', 'symbol'], ['raw_payload', 'symbol'], ['result', 'symbol']])}",
+                f"Side：{_get_first(evt, [['side'], ['payload', 'side'], ['raw_payload', 'side'], ['result', 'side'], ['raw_payload', 'signal']])}",
+                f"Qty：{_get_first(evt, [['qty'], ['quantity'], ['payload', 'qty'], ['payload', 'quantity'], ['result', 'qty'], ['result', 'quantity']])}",
+                f"Price：{_get_first(evt, [['price'], ['payload', 'price'], ['raw_payload', 'price'], ['result', 'price']])}",
+                f"Message：{_get_first(evt, [['message'], ['reason'], ['state_save_error'], ['payload', 'message'], ['payload', 'reason'], ['result', 'message'], ['result', 'reason']])}",
+            ]
+        )
+    return "\n".join(
+        [
+            "[最新決策]",
+            f"時間：{_get_first(evt, [['timestamp'], ['payload', 'timestamp'], ['result', 'timestamp']])}",
+            f"Request ID：{_get_first(evt, [['request_id'], ['payload', 'request_id'], ['result', 'request_id']])}",
+            f"Decision：{_get_first(evt, [['decision'], ['payload', 'decision'], ['result', 'decision'], ['trace', 'decision']])}",
+            f"Reason：{_get_first(evt, [['reason'], ['payload', 'reason'], ['result', 'reason'], ['trace', 'reason'], ['trace', 'reason_code'], ['reason_code']])}",
+            f"Signal：{_get_first(evt, [['signal'], ['payload', 'signal'], ['raw_payload', 'signal'], ['trace', 'signal']])}",
+            f"Symbol：{_get_first(evt, [['symbol'], ['payload', 'symbol'], ['raw_payload', 'symbol'], ['trace', 'symbol']])}",
+            f"Price：{_get_first(evt, [['price'], ['payload', 'price'], ['raw_payload', 'price'], ['trace', 'price']])}",
+            f"Regime：{_get_first(evt, [['regime'], ['payload', 'regime'], ['trace', 'regime'], ['trace', 'inputs', 'regime']])}",
+        ]
+    )
+
+
+def _format_last_signal_message() -> str:
+    evt = tail_jsonl_find_last(
+        SIGNAL_LOG_PATH,
+        lambda o: "signal" in str(o.get("event_type", "")).lower(),
+        max_lines=4096,
+    )
+    if not evt:
+        return "目前沒有訊號紀錄"
+    return "\n".join(
+        [
+            "[最新訊號]",
+            f"時間：{_get_first(evt, [['timestamp'], ['payload', 'timestamp'], ['result', 'timestamp']])}",
+            f"Request ID：{_get_first(evt, [['request_id'], ['payload', 'request_id'], ['result', 'request_id']])}",
+            f"Symbol：{_get_first(evt, [['symbol'], ['payload', 'symbol'], ['raw_payload', 'symbol']])}",
+            f"Signal：{_get_first(evt, [['signal'], ['payload', 'signal'], ['raw_payload', 'signal']])}",
+            f"Price：{_get_first(evt, [['price'], ['payload', 'price'], ['raw_payload', 'price']])}",
+            f"Breakout Level：{_get_first(evt, [['breakout_level'], ['payload', 'breakout_level'], ['raw_payload', 'breakout_level']])}",
+            f"Delta Strength：{_get_first(evt, [['delta_strength'], ['payload', 'delta_strength'], ['raw_payload', 'delta_strength']])}",
+        ]
+    )
+
+
+def _format_risk_message() -> str:
+    lock = load_manual_trade_lock()
+    state = reset_state_if_new_day(load_state())
+    if not isinstance(state, dict):
+        return "目前沒有風控資料"
+    locked = None if not lock else lock.get("locked")
+    reason = None if not lock else lock.get("reason")
+    updated_at = None if not lock else lock.get("updated_at")
+    return (
+        "[Risk]\n"
+        f"manual_locked={locked}\n"
+        f"manual_lock_reason={reason}\n"
+        f"manual_lock_updated_at={updated_at}\n"
+        f"today_loss={state.get('today_loss')}\n"
+        f"consecutive_loss={state.get('consecutive_loss')}\n"
+        f"daily_trade_count={state.get('daily_trade_count')}\n"
+        f"cooldown_until={state.get('cooldown_until')}\n"
+        f"lock_reason={state.get('lock_reason')}"
+    )
+
+
 def format_last_message(
     *,
     signal_log_path: Path | None = None,
@@ -352,6 +533,7 @@ def _send_message(
     *,
     chat_id: str | None = None,
     token: str | None = None,
+    reply_markup: dict[str, Any] | None = None,
     timeout_sec: float = 10.0,
 ) -> dict[str, Any]:
     """
@@ -368,14 +550,14 @@ def _send_message(
         base["error"] = "missing_chat_id"
         return base
     url = f"{TELEGRAM_API}/bot{tok}/sendMessage"
-    body = json.dumps(
-        {
-            "chat_id": cid,
-            "text": text,
-            "disable_web_page_preview": True,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "chat_id": cid,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -411,6 +593,61 @@ def _send_message(
     if data.get("ok") is True:
         base["ok"] = True
         base["error"] = None
+        return base
+    base["error"] = str(data.get("description") or data)[:2000]
+    return base
+
+
+def _answer_callback_query(
+    callback_query_id: str,
+    *,
+    token: str | None = None,
+    timeout_sec: float = 10.0,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {"ok": False, "status_code": None, "error": None}
+    tok = (token or _env_token() or "").strip()
+    cqid = str(callback_query_id or "").strip()
+    if not tok:
+        base["error"] = "missing_token"
+        return base
+    if not cqid:
+        base["error"] = "missing_callback_query_id"
+        return base
+    url = f"{TELEGRAM_API}/bot{tok}/answerCallbackQuery"
+    body = json.dumps({"callback_query_id": cqid}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    raw = ""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            status = getattr(resp, "status", None) or resp.getcode()
+            base["status_code"] = int(status)
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = str(exc)
+        base["status_code"] = int(exc.code)
+        base["error"] = err_body[:2000]
+        return base
+    except Exception as exc:  # noqa: BLE001
+        base["error"] = str(exc)[:2000]
+        return base
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        base["error"] = f"invalid_json_response:{raw[:500]}"
+        return base
+    if not isinstance(data, dict):
+        base["error"] = "unexpected_response_shape"
+        return base
+    if data.get("ok") is True:
+        base["ok"] = True
         return base
     base["error"] = str(data.get("description") or data)[:2000]
     return base
@@ -474,25 +711,66 @@ def handle_telegram_update(update: dict[str, Any]) -> None:
     fields = extract_update_fields(update)
     chat_id = fields.get("chat_id")
     text = fields.get("text") or ""
+    update_type = fields.get("update_type")
+    callback_query_id = fields.get("callback_query_id")
     if not _authorized_chat_id(chat_id):
         return
 
-    cmd = (text or "").strip().split(maxsplit=1)[0].lower()
-    if cmd in ("/help", "/start"):
-        reply = format_help_message()
-    elif cmd == "/state":
-        st = reset_state_if_new_day(load_state())
-        reply = format_state_message(st)
-    elif cmd == "/last":
-        reply = format_last_message()
+    reply_markup = None
+    if update_type == "callback_query":
+        data = (text or "").strip()
+        if data == "status":
+            st = reset_state_if_new_day(load_state())
+            reply = format_state_message(st)
+        elif data == "last_decision":
+            reply = _format_last_event_by_type("decision_result", "LastDecision")
+        elif data == "last_fill":
+            reply = _format_last_event_by_type("fill_result", "LastFill")
+        elif data == "last_signal":
+            reply = _format_last_signal_message()
+        elif data == "risk":
+            reply = _format_risk_message()
+        elif data == "lock_trading":
+            ok = save_manual_trade_lock(True, "manual_lock")
+            reply = "交易已鎖定（手動）" if ok else "交易鎖定失敗，請稍後重試"
+        elif data == "unlock_trading":
+            ok = save_manual_trade_lock(False, "manual_unlock")
+            reply = "交易已解除鎖定（手動）" if ok else "解除鎖定失敗，請稍後重試"
+        elif data == "help":
+            reply = format_help_message()
+            reply_markup = build_main_menu_keyboard()
+        else:
+            reply = "未知操作，請使用主選單"
     else:
-        if not text:
-            return
-        reply = format_help_message()
+        cmd = (text or "").strip().split(maxsplit=1)[0].lower()
+        if cmd == "/start":
+            reply = "歡迎使用交易控制台，請使用下方主選單。"
+            reply_markup = build_main_menu_keyboard()
+        elif cmd == "/help":
+            reply = format_help_message()
+            reply_markup = build_main_menu_keyboard()
+        elif cmd == "/state":
+            st = reset_state_if_new_day(load_state())
+            reply = format_state_message(st)
+        elif cmd == "/last":
+            reply = format_last_message()
+        else:
+            if not text:
+                return
+            reply = format_help_message()
+            reply_markup = build_main_menu_keyboard()
 
-    res = _send_message(reply, chat_id=str(chat_id) if chat_id is not None else None)
+    res = _send_message(
+        reply,
+        chat_id=str(chat_id) if chat_id is not None else None,
+        reply_markup=reply_markup,
+    )
     if not res.get("ok"):
         print(f"[telegram-error] command reply failed: {res}")
+    if update_type == "callback_query" and callback_query_id:
+        ack = _answer_callback_query(str(callback_query_id))
+        if not ack.get("ok"):
+            print(f"[telegram-error] answerCallbackQuery failed: {ack}")
 
 
 def process_telegram_webhook(

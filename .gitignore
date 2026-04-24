@@ -27,3 +27,6 @@ nohup.out
 Thumbs.db
 .vscode/
 .idea/
+
+# Local deploy / upload artifacts
+yui-quant-lab-upload.tgz

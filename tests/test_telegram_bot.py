@@ -61,11 +61,12 @@ class ExtractUpdateFieldsTests(unittest.TestCase):
         self.assertEqual(f["text"], "/state")
 
     def test_callback_no_plain_text(self) -> None:
-        u = {"callback_query": {"message": {"chat": {"id": 7}}, "data": "noop"}}
+        u = {"callback_query": {"id": "cbq_1", "message": {"chat": {"id": 7}}, "data": "noop"}}
         f = tg.extract_update_fields(u)
         self.assertEqual(f["update_type"], "callback_query")
         self.assertEqual(f["chat_id"], 7)
         self.assertEqual(f["text"], "noop")
+        self.assertEqual(f["callback_query_id"], "cbq_1")
 
     def test_empty_update(self) -> None:
         f = tg.extract_update_fields({})
@@ -98,6 +99,7 @@ class TelegramWebhookIntegrationTests(unittest.TestCase):
         state_manager.OUTPUT_DIR = self.output_dir
         state_manager.STATE_PATH = self.output_dir / "state.json"
         state_manager.FILL_DEDUPE_PATH = self.output_dir / "fill_request_ids.json"
+        tg.MANUAL_TRADE_LOCK_PATH = self.output_dir / "manual_trade_lock.json"
 
         self.client = app_module.app.test_client()
         self._env_patch = patch.dict(
@@ -137,6 +139,169 @@ class TelegramWebhookIntegrationTests(unittest.TestCase):
         sm.assert_called_once()
         args, kwargs = sm.call_args
         self.assertIn("[State]", args[0])
+
+    def test_start_command_sends_menu(self) -> None:
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as sm:
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={"message": {"chat": {"id": 4242}, "text": "/start"}},
+            )
+        self.assertEqual(resp.status_code, 200)
+        sm.assert_called_once()
+        _, kwargs = sm.call_args
+        self.assertIn("reply_markup", kwargs)
+        self.assertIn("inline_keyboard", kwargs["reply_markup"])
+
+    def test_help_command_keeps_help_and_menu(self) -> None:
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as sm:
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={"message": {"chat": {"id": 4242}, "text": "/help"}},
+            )
+        self.assertEqual(resp.status_code, 200)
+        args, kwargs = sm.call_args
+        self.assertIn("[Help]", args[0])
+        self.assertIn("reply_markup", kwargs)
+
+    def test_callback_status_replies_state_and_answers_callback(self) -> None:
+        state_manager.save_state(state_manager._default_state())
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as sm, patch.object(
+            tg,
+            "_answer_callback_query",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as ack:
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq_status_1",
+                        "message": {"chat": {"id": 4242}},
+                        "data": "status",
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        args, _ = sm.call_args
+        self.assertIn("[State]", args[0])
+        ack.assert_called_once_with("cbq_status_1")
+
+    def test_callback_answer_failure_does_not_break_webhook_flow(self) -> None:
+        state_manager.save_state(state_manager._default_state())
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as sm, patch.object(
+            tg,
+            "_answer_callback_query",
+            return_value={"ok": False, "status_code": 500, "error": "mock error"},
+        ) as ack:
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq_status_fail_1",
+                        "message": {"chat": {"id": 4242}},
+                        "data": "status",
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["ok"])
+        sm.assert_called_once()
+        args, _ = sm.call_args
+        self.assertIn("[State]", args[0])
+        ack.assert_called_once_with("cbq_status_fail_1")
+
+    def test_callback_lock_trading_writes_manual_lock_file(self) -> None:
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ), patch.object(
+            tg,
+            "_answer_callback_query",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ):
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq_lock_1",
+                        "message": {"chat": {"id": 4242}},
+                        "data": "lock_trading",
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(tg.MANUAL_TRADE_LOCK_PATH.read_text(encoding="utf-8"))
+        self.assertTrue(payload["locked"])
+        self.assertEqual(payload["source"], "telegram")
+        self.assertEqual(payload["reason"], "manual_lock")
+        self.assertIn("updated_at", payload)
+
+    def test_callback_unlock_trading_writes_manual_lock_file(self) -> None:
+        tg.save_manual_trade_lock(True, "manual_lock")
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ), patch.object(
+            tg,
+            "_answer_callback_query",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ):
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq_unlock_1",
+                        "message": {"chat": {"id": 4242}},
+                        "data": "unlock_trading",
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(tg.MANUAL_TRADE_LOCK_PATH.read_text(encoding="utf-8"))
+        self.assertFalse(payload["locked"])
+        self.assertEqual(payload["source"], "telegram")
+        self.assertEqual(payload["reason"], "manual_unlock")
+
+    def test_callback_unknown_does_not_crash(self) -> None:
+        with patch.object(
+            tg,
+            "_send_message",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ) as sm, patch.object(
+            tg,
+            "_answer_callback_query",
+            return_value={"ok": True, "status_code": 200, "error": None},
+        ):
+            resp = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq_unknown_1",
+                        "message": {"chat": {"id": 4242}},
+                        "data": "unknown_action",
+                    }
+                },
+            )
+        self.assertEqual(resp.status_code, 200)
+        args, _ = sm.call_args
+        self.assertIn("未知操作", args[0])
 
     def test_unauthorized_chat_is_silent_ok(self) -> None:
         with patch.object(tg, "_send_message") as sm:
@@ -285,6 +450,98 @@ class FillNotifyHookTests(unittest.TestCase):
         self.assertFalse(first.get("dedupe"))
         self.assertFalse(second["applied"])
         self.assertTrue(second.get("dedupe"))
+
+
+class LastFormatterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.log_path = Path(self.tmp.name) / "signal_log.jsonl"
+        self._orig_signal_log_path = tg.SIGNAL_LOG_PATH
+        tg.SIGNAL_LOG_PATH = self.log_path
+
+    def tearDown(self) -> None:
+        tg.SIGNAL_LOG_PATH = self._orig_signal_log_path
+        self.tmp.cleanup()
+
+    def _write_events(self, events: list[dict]) -> None:
+        lines = "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
+        self.log_path.write_text(lines, encoding="utf-8")
+
+    def test_last_decision_message_is_short_and_without_payload_dump(self) -> None:
+        self._write_events(
+            [
+                {
+                    "event_type": "decision_result",
+                    "request_id": "req_1",
+                    "timestamp": "2026-04-25T01:00:00+08:00",
+                    "decision": "CHASE",
+                    "reason": "chase_ok",
+                    "raw_payload": {"signal": "long_breakout", "symbol": "MNQ", "price": 20150},
+                    "trace": {"inputs": {"regime": "range"}},
+                }
+            ]
+        )
+        msg = tg._format_last_event_by_type("decision_result", "LastDecision")
+        self.assertIn("[最新決策]", msg)
+        self.assertIn("Decision：CHASE", msg)
+        self.assertNotIn("payload=", msg)
+        self.assertNotIn('"event_type": "decision_result"', msg)
+
+    def test_last_signal_message_is_short_and_without_payload_dump(self) -> None:
+        self._write_events(
+            [
+                {
+                    "event_type": "signal_received",
+                    "request_id": "req_sig_1",
+                    "timestamp": "2026-04-25T01:00:01+08:00",
+                    "payload": {
+                        "symbol": "MNQ",
+                        "signal": "long_breakout",
+                        "price": 20155.5,
+                        "breakout_level": 20145,
+                        "delta_strength": 0.92,
+                    },
+                }
+            ]
+        )
+        msg = tg._format_last_signal_message()
+        self.assertIn("[最新訊號]", msg)
+        self.assertIn("Symbol：MNQ", msg)
+        self.assertNotIn("payload=", msg)
+        self.assertNotIn('"symbol": "MNQ"', msg)
+
+    def test_missing_fields_do_not_crash_and_use_dash(self) -> None:
+        self._write_events(
+            [
+                {
+                    "event_type": "decision_result",
+                    "request_id": "req_missing",
+                }
+            ]
+        )
+        msg = tg._format_last_event_by_type("decision_result", "LastDecision")
+        self.assertIn("Decision：-", msg)
+        self.assertIn("Reason：-", msg)
+        self.assertIn("Price：-", msg)
+
+    def test_last_fill_message_short_format(self) -> None:
+        self._write_events(
+            [
+                {
+                    "event_type": "fill_result",
+                    "request_id": "req_fill_1",
+                    "timestamp": "2026-04-25T01:00:02+08:00",
+                    "status": "applied",
+                    "payload": {"symbol": "MNQ", "side": "BUY", "qty": 1, "price": 20160},
+                    "message": "fill synced",
+                }
+            ]
+        )
+        msg = tg._format_last_event_by_type("fill_result", "LastFill")
+        self.assertIn("[最新成交]", msg)
+        self.assertIn("Status：applied", msg)
+        self.assertIn("Symbol：MNQ", msg)
+        self.assertNotIn("payload=", msg)
 
 
 if __name__ == "__main__":
