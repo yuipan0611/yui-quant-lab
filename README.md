@@ -2,6 +2,8 @@
 
 個人用的量化交易實驗專案：Flask webhook 接 TradingView／外部訊號，經決策引擎寫入 `output/`，可選 Telegram 通知與指令控制。
 
+端點流程、Gunicorn／VPS、狀態 gate 等**完整說明**在 `docs/`（建議從 [docs/architecture.md](docs/architecture.md)、[docs/deployment.md](docs/deployment.md)、[docs/vps_runbook.md](docs/vps_runbook.md) 開始）。
+
 ## 自己看的開發筆記
 
 ### 2026-04-25
