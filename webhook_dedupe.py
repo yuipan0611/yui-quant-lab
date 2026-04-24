@@ -31,9 +31,15 @@ import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 # 這些欄位「名稱」會從指紋計算用的樹狀資料中移除（不分大小寫比對）。
 # 設計理由：它們多半代表「這次 HTTP 的唯一性 / 時間 / 外部事件序號」，
@@ -158,6 +164,35 @@ def _atomic_write_json(path: Path, obj: object) -> None:
     os.replace(tmp, path)
 
 
+def _lock_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".lock")
+
+
+@contextmanager
+def _dedupe_file_lock(path: Path):
+    """
+    跨 process 鎖（Linux 走 fcntl.flock）。
+    lock 檔案與 dedupe 檔放同一目錄，確保單機多 worker 的 read-modify-write 臨界區互斥。
+    """
+    lock_path = _lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lock_fp:
+        if fcntl is not None:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+
+def _trim_store_size(store: dict[str, float]) -> None:
+    # 避免檔案無限長大：超量就砍掉最舊的（仍以過期時間為主）。
+    if len(store) > 5000:
+        for k in sorted(store, key=lambda x: store[x])[:1000]:
+            store.pop(k, None)
+
+
 def is_duplicate(endpoint: str, payload: dict) -> bool:
     fp = fingerprint_for(endpoint, payload)
     path = _dedupe_path()
@@ -174,8 +209,33 @@ def remember(endpoint: str, payload: dict) -> None:
     ttl = float(_ttl_seconds())
     store = _prune_store(_load_store(path), now)
     store[fp] = now + ttl
-    # 避免檔案無限長大：超量就砍掉最舊的（仍以過期時間為主）。
-    if len(store) > 5000:
-        for k in sorted(store, key=lambda x: store[x])[:1000]:
-            store.pop(k, None)
+    _trim_store_size(store)
     _atomic_write_json(path, store)
+
+
+def check_and_remember(endpoint: str, payload: dict) -> bool:
+    """
+    原子 check-and-remember。
+
+    回傳：
+    - True: duplicate（呼叫端應略過）
+    - False: 非 duplicate，且已在同一臨界區內完成 remember
+    """
+    fp = fingerprint_for(endpoint, payload)
+    path = _dedupe_path()
+    now = time.time()
+    ttl = float(_ttl_seconds())
+    with _dedupe_file_lock(path):
+        store_before = _load_store(path)
+        store = _prune_store(store_before, now)
+        exp = store.get(fp)
+        if exp is not None and exp > now:
+            if store != store_before:
+                _trim_store_size(store)
+                _atomic_write_json(path, store)
+            return True
+
+        store[fp] = now + ttl
+        _trim_store_size(store)
+        _atomic_write_json(path, store)
+        return False

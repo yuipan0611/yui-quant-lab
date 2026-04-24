@@ -270,3 +270,18 @@ sudo systemctl disable yui-quant-lab.service
 ```
 
 還原 `.env`、程式用 Git；必要時移除 `sites-enabled` 裡的 site 連結後 `nginx -t && reload`。
+
+---
+
+## Deployment Note：webhook_dedupe（Gunicorn 多 worker）
+
+目前部署設計重點如下（2026-04）：
+
+1. `systemd` 使用 Gunicorn `-w 2`（多 process worker）。
+2. `webhook_dedupe` 使用 `output/webhook_dedupe.json` 作為單機共享 dedupe store。
+3. `check_and_remember()` 使用 `fcntl.flock` + 獨立 `.lock` 檔（例如 `output/webhook_dedupe.json.lock`），提供單機多 worker 的原子 check-and-remember。
+4. 以上屬於「單機安全」設計，**不是**跨多台 VPS / 多容器的全域一致性保證。
+5. 若未來做水平擴展（多機、多容器），需改用 Redis / DB / external lock 等共享協調機制。
+6. 測試面已補 multiprocessing unittest，覆蓋：
+   - same payload: only-one-first
+   - different payload: no-lost-update

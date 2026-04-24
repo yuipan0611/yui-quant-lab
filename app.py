@@ -31,7 +31,7 @@ from state_manager import (
 )
 from telegram_bot import notify_decision, notify_fill_result, process_telegram_webhook
 from time_utils import iso_now_taipei
-from webhook_dedupe import fingerprint_for, is_duplicate, remember
+from webhook_dedupe import check_and_remember, fingerprint_for
 
 # Load local .env automatically for repeatable startup without manual exports.
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
@@ -459,7 +459,7 @@ def webhook():
             required_fields=REQUIRED_FIELDS,
         )
 
-    if is_duplicate("/webhook", payload):
+    if check_and_remember("/webhook", payload):
         fp = fingerprint_for("/webhook", payload)
         _safe_log(
             {
@@ -479,7 +479,6 @@ def webhook():
 
     request_id = _new_request_id()
     result = process_webhook_payload(payload, request_id=request_id)
-    remember("/webhook", payload)
     return jsonify(
         {
             "status": "success",
@@ -517,7 +516,7 @@ def tv_webhook():
     if not isinstance(sym_raw, str) or not sym_raw.strip():
         return _tv_bad("bad_payload")
 
-    if is_duplicate("/tv-webhook", body):
+    if check_and_remember("/tv-webhook", body):
         fp = fingerprint_for("/tv-webhook", body)
         _safe_log(
             {
@@ -557,8 +556,6 @@ def tv_webhook():
         print(f"[error] tv_webhook process_webhook_payload failed: {exc}")
         traceback.print_exc()
         return jsonify({"ok": False, "error": "internal_error"}), 500
-
-    remember("/tv-webhook", body)
 
     tr_raw = result.get("trace")
     tr = tr_raw if isinstance(tr_raw, dict) else {}
