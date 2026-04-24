@@ -1,0 +1,114 @@
+### live-chain-check @ 2026-04-25T05:07:17+08:00
+[1/3] Flask health check
+health status=200 body={"status":"ok"}
+
+[2/3] TradingView -> /tv-webhook
+tv-webhook status=200
+{"branch": "LONG", "decision": "SKIP", "duplicate": true, "message": "Same tv-webhook payload was recently processed; ignored for idempotency.", "ok": true, "reason_code": "DUPLICATE_IGNORED", "request_id": "dup_16f9a3f21d31", "status": "duplicate_ignored", "trace": {"branch": "LONG", "decision": "SKIP", "duplicate": true, "inputs": {"regime": null, "signal": "long_breakout"}, "reason_code": "DUPLICATE_IGNORED", "timestamp": "2026-04-25T05:07:17+08:00"}}
+
+[3/3] Telegram notify smoke — SKIPPED（idempotency：重複 payload 已忽略）
+hint: 若要完整跑決策 + Telegram，可刪除 output/webhook_dedupe.json 或等 WEBHOOK_DEDUPE_TTL_SEC 過後再執行本腳本。
+
+PASS: live chain check completed（duplicate 路徑，HTTP 與去重行為正常）。
+
+### journalctl -u yui-quant-lab.service -n 100 @ 2026-04-25T05:07:17+08:00
+Apr 25 03:23:49 srv1605300 systemd[1]: Stopping yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:23:49 srv1605300 gunicorn[2464]: [2026-04-25 03:23:49 +0800] [2464] [INFO] Worker exiting (pid: 2464)
+Apr 25 03:23:49 srv1605300 gunicorn[2463]: [2026-04-25 03:23:49 +0800] [2463] [INFO] Handling signal: term
+Apr 25 03:23:49 srv1605300 gunicorn[2463]: [2026-04-25 03:23:49 +0800] [2463] [ERROR] Worker (pid:2464) was sent SIGTERM!
+Apr 25 03:23:49 srv1605300 gunicorn[2463]: [2026-04-25 03:23:49 +0800] [2463] [INFO] Shutting down: Master
+Apr 25 03:23:49 srv1605300 systemd[1]: yui-quant-lab.service: Deactivated successfully.
+Apr 25 03:23:49 srv1605300 systemd[1]: Stopped yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:23:49 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:23:49 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:23:49 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:23:49 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:23:54 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 1.
+Apr 25 03:23:54 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:23:54 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:23:54 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:23:54 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:00 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 2.
+Apr 25 03:24:00 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:00 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:00 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:00 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:05 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 3.
+Apr 25 03:24:05 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:05 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:05 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:05 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:10 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 4.
+Apr 25 03:24:10 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:10 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:10 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:10 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:15 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 5.
+Apr 25 03:24:15 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:15 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:15 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:15 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:21 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 6.
+Apr 25 03:24:21 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:21 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:21 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:21 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:26 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 7.
+Apr 25 03:24:26 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:26 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:26 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:26 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:31 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 8.
+Apr 25 03:24:31 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:31 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:31 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:31 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:36 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 9.
+Apr 25 03:24:36 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:24:36 srv1605300 systemd[1]: yui-quant-lab.service: Control process exited, code=exited, status=1/FAILURE
+Apr 25 03:24:36 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:36 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:24:42 srv1605300 systemd[1]: yui-quant-lab.service: Scheduled restart job, restart counter is at 10.
+Apr 25 03:24:42 srv1605300 systemd[1]: yui-quant-lab.service: Start request repeated too quickly.
+Apr 25 03:24:42 srv1605300 systemd[1]: yui-quant-lab.service: Failed with result 'exit-code'.
+Apr 25 03:24:42 srv1605300 systemd[1]: Failed to start yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:25:15 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab Webhook Server...
+Apr 25 03:25:15 srv1605300 systemd[1]: Started yui-quant-lab.service - YUI Quant Lab Webhook Server.
+Apr 25 03:25:15 srv1605300 gunicorn[2842]: [2026-04-25 03:25:15 +0800] [2842] [INFO] Starting gunicorn 25.3.0
+Apr 25 03:25:15 srv1605300 gunicorn[2842]: [2026-04-25 03:25:15 +0800] [2842] [INFO] Listening at: http://127.0.0.1:8000 (2842)
+Apr 25 03:25:15 srv1605300 gunicorn[2842]: [2026-04-25 03:25:15 +0800] [2842] [INFO] Using worker: sync
+Apr 25 03:25:15 srv1605300 gunicorn[2846]: [2026-04-25 03:25:15 +0800] [2846] [INFO] Booting worker with pid: 2846
+Apr 25 03:25:15 srv1605300 gunicorn[2847]: [2026-04-25 03:25:15 +0800] [2847] [INFO] Booting worker with pid: 2847
+Apr 25 03:25:15 srv1605300 gunicorn[2842]: [2026-04-25 03:25:15 +0800] [2842] [INFO] Control socket listening at /root/.gunicorn/gunicorn.ctl
+Apr 25 04:57:29 srv1605300 systemd[1]: Stopping yui-quant-lab.service - YUI Quant Lab webhook (Gunicorn + Flask)...
+Apr 25 04:57:29 srv1605300 gunicorn[2842]: [2026-04-25 04:57:29 +0800] [2842] [INFO] Handling signal: term
+Apr 25 04:57:29 srv1605300 gunicorn[2846]: [2026-04-25 04:57:29 +0800] [2846] [INFO] Worker exiting (pid: 2846)
+Apr 25 04:57:29 srv1605300 gunicorn[2847]: [2026-04-25 04:57:29 +0800] [2847] [INFO] Worker exiting (pid: 2847)
+Apr 25 04:57:30 srv1605300 gunicorn[2842]: [2026-04-25 04:57:30 +0800] [2842] [INFO] Worker (pid:2846) was sent SIGTERM!
+Apr 25 04:57:30 srv1605300 gunicorn[2842]: [2026-04-25 04:57:30 +0800] [2842] [INFO] Worker (pid:2847) was sent SIGTERM!
+Apr 25 04:57:30 srv1605300 gunicorn[2842]: [2026-04-25 04:57:30 +0800] [2842] [INFO] Shutting down: Master
+Apr 25 04:57:30 srv1605300 systemd[1]: yui-quant-lab.service: Deactivated successfully.
+Apr 25 04:57:30 srv1605300 systemd[1]: Stopped yui-quant-lab.service - YUI Quant Lab webhook (Gunicorn + Flask).
+Apr 25 04:57:30 srv1605300 systemd[1]: yui-quant-lab.service: Consumed 1.378s CPU time, 49.5M memory peak, 0B memory swap peak.
+Apr 25 04:57:30 srv1605300 systemd[1]: Starting yui-quant-lab.service - YUI Quant Lab webhook (Gunicorn + Flask)...
+Apr 25 04:57:30 srv1605300 systemd[1]: Started yui-quant-lab.service - YUI Quant Lab webhook (Gunicorn + Flask).
+Apr 25 04:57:30 srv1605300 gunicorn[3379]: [2026-04-25 04:57:30 +0800] [3379] [INFO] Starting gunicorn 23.0.0
+Apr 25 04:57:30 srv1605300 gunicorn[3379]: [2026-04-25 04:57:30 +0800] [3379] [INFO] Listening at: http://127.0.0.1:8000 (3379)
+Apr 25 04:57:30 srv1605300 gunicorn[3379]: [2026-04-25 04:57:30 +0800] [3379] [INFO] Using worker: sync
+Apr 25 04:57:30 srv1605300 gunicorn[3380]: [2026-04-25 04:57:30 +0800] [3380] [INFO] Booting worker with pid: 3380
+Apr 25 04:58:26 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:04:58:26 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 04:59:31 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:04:59:31 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 05:00:16 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:00:16 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 05:00:24 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:00:24 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 05:03:57 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:03:57 +0800] "GET /health HTTP/1.1" 200 16 "-" "Python-urllib/3.12"
+Apr 25 05:03:57 srv1605300 gunicorn[3380]: {"event": "raw_request", "method": "POST", "path": "/tv-webhook", "client_ip": "127.0.0.1", "content_length": 204, "body_bytes": 204, "log_mode": "compact", "truncated": false, "body_preview": "{\"secret\": \"***redacted***\", \"symbol\": \"MNQ\", \"signal\": \"long_breakout\", \"price\": 20150, \"breakout_level\": 20145, \"delta_strength\": 0.92, \"bias\": \"bullish\", \"levels\": {\"s1\": 20000, \"r1\": 20300}}"}
+Apr 25 05:03:58 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:03:58 +0800] "POST /tv-webhook HTTP/1.1" 200 781 "-" "Python-urllib/3.12"
+Apr 25 05:06:25 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:06:25 +0800] "GET / HTTP/1.1" 404 207 "-" "Mozilla/5.0 (Linux; Android 8.0.0; SM-G965U Build/R16NW) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.111 Mobile Safari/537.36"
+Apr 25 05:06:25 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:06:25 +0800] "GET / HTTP/1.1" 404 207 "-" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
+Apr 25 05:06:25 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:06:25 +0800] "GET / HTTP/1.1" 404 207 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:83.0) Gecko/20100101 Firefox/83.0"
+Apr 25 05:06:43 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:06:43 +0800] "GET / HTTP/1.1" 404 207 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:83.0) Gecko/20100101 Firefox/83.0"
+Apr 25 05:07:17 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:07:17 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 05:07:17 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:07:17 +0800] "GET /health HTTP/1.1" 200 16 "-" "curl/8.5.0"
+Apr 25 05:07:17 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:07:17 +0800] "GET /health HTTP/1.1" 200 16 "-" "Python-urllib/3.12"
+Apr 25 05:07:17 srv1605300 gunicorn[3380]: {"event": "raw_request", "method": "POST", "path": "/tv-webhook", "client_ip": "127.0.0.1", "content_length": 204, "body_bytes": 204, "log_mode": "compact", "truncated": false, "body_preview": "{\"secret\": \"***redacted***\", \"symbol\": \"MNQ\", \"signal\": \"long_breakout\", \"price\": 20150, \"breakout_level\": 20145, \"delta_strength\": 0.92, \"bias\": \"bullish\", \"levels\": {\"s1\": 20000, \"r1\": 20300}}"}
+Apr 25 05:07:17 srv1605300 gunicorn[3380]: 127.0.0.1 - - [25/Apr/2026:05:07:17 +0800] "POST /tv-webhook HTTP/1.1" 200 428 "-" "Python-urllib/3.12"

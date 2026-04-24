@@ -1,0 +1,42 @@
+# /etc/systemd/system/yui-quant-lab.service
+# Copy to /etc/systemd/system/yui-quant-lab.service and adjust User / paths.
+#
+# Environment: only project-root .env loaded by app.py (python-dotenv).
+# Do NOT use systemd EnvironmentFile for secrets (single source of truth).
+#
+# Gunicorn: --workers 1 required (file-based state under output/; multiple
+# workers risk concurrent writes to state.json / JSONL).
+
+[Unit]
+Description=YUI Quant Lab webhook (Gunicorn + Flask)
+After=network.target
+# 啟動風暴保護（白話）：
+# - 服務偶爾崩潰時，Restart=always 會自動救回來（提高可用性）。
+# - 但如果是「設定錯誤 / 永久錯誤」導致一直起不來，不能無限重啟打爆 CPU 與 journal。
+# - 這兩行就是 systemd 的「踩煞車」：短時間內重啟太多次就先停住，讓你去查原因。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/yui-quant-lab
+# 啟動前守門（白話）：在真的拉起 Gunicorn 之前，先確認最基本的檔案/目錄存在。
+# 若這裡失敗，代表「十之八九是路徑或 venv 沒裝好」，比較好一眼定位問題。
+# 注意：路徑必須與 WorkingDirectory / ExecStart 一致（把 root 改成你的使用者與目錄）。
+ExecStartPre=/usr/bin/test -f /root/yui-quant-lab/.env
+ExecStartPre=/usr/bin/test -x /root/yui-quant-lab/.venv/bin/gunicorn
+ExecStartPre=/usr/bin/test -d /root/yui-quant-lab
+ExecStart=/root/yui-quant-lab/.venv/bin/gunicorn \
+  --bind 127.0.0.1:8000 \
+  --workers 1 \
+  --timeout 120 \
+  --access-logfile - \
+  --error-logfile - \
+  app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
