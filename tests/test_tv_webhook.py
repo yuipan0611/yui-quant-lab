@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import os
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +16,21 @@ import state_manager
 import telegram_bot as tg_module
 from decision_engine import REASON_UNSUPPORTED_SIGNAL
 import webhook_dedupe as webhook_dedupe_module
+
+
+def _mp_check_and_remember_worker(
+    dedupe_path: str,
+    endpoint: str,
+    payload: dict,
+    start_event,
+    result_queue,
+) -> None:
+    # 每個 process 都使用同一個 dedupe store 路徑，模擬 Gunicorn 多 worker。
+    os.environ["WEBHOOK_DEDUPE_PATH"] = dedupe_path
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    start_event.wait()
+    is_dup = webhook_dedupe_module.check_and_remember(endpoint, payload)
+    result_queue.put(bool(is_dup))
 
 
 class TvWebhookTests(unittest.TestCase):
@@ -279,3 +296,219 @@ def test_remember_writes_to_webhook_dedupe_path(tmp_path, monkeypatch) -> None:
     data = json.loads(target_path.read_text(encoding="utf-8"))
     assert isinstance(data, dict)
     assert len(data) == 1
+
+
+def test_check_and_remember_same_endpoint_same_payload(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+    assert webhook_dedupe_module.check_and_remember("/webhook", payload) is False
+    assert webhook_dedupe_module.check_and_remember("/webhook", payload) is True
+
+
+def test_check_and_remember_same_payload_different_endpoint_not_duplicate(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+    assert webhook_dedupe_module.check_and_remember("/webhook", payload) is False
+    assert webhook_dedupe_module.check_and_remember("/tv-webhook", payload) is False
+
+
+def test_check_and_remember_ttl_window_then_expire(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    monkeypatch.setenv("WEBHOOK_DEDUPE_TTL_SEC", "30")
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+    with patch("webhook_dedupe.time.time", return_value=1000.0):
+        assert webhook_dedupe_module.check_and_remember("/webhook", payload) is False
+    with patch("webhook_dedupe.time.time", return_value=1020.0):
+        assert webhook_dedupe_module.check_and_remember("/webhook", payload) is True
+    with patch("webhook_dedupe.time.time", return_value=1031.0):
+        assert webhook_dedupe_module.check_and_remember("/webhook", payload) is False
+
+
+def test_check_and_remember_concurrent_same_payload_only_one_first(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        got = webhook_dedupe_module.check_and_remember("/webhook", payload)
+        with lock:
+            results.append(got)
+
+    threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results.count(False) == 1
+    assert results.count(True) == thread_count - 1
+
+
+def test_check_and_remember_concurrent_two_payloads_no_lost_update(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload_a = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+    payload_b = {
+        "symbol": "MNQ",
+        "signal": "short_breakout",
+        "price": 20140.0,
+        "breakout_level": 20142.0,
+        "delta_strength": 0.8,
+    }
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def worker(payload: dict) -> None:
+        barrier.wait()
+        got = webhook_dedupe_module.check_and_remember("/webhook", payload)
+        with lock:
+            results.append(got)
+
+    t1 = threading.Thread(target=worker, args=(payload_a,))
+    t2 = threading.Thread(target=worker, args=(payload_b,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results.count(False) == 2
+    store = json.loads(target_path.read_text(encoding="utf-8"))
+    assert isinstance(store, dict)
+    fp_a = webhook_dedupe_module.fingerprint_for("/webhook", payload_a)
+    fp_b = webhook_dedupe_module.fingerprint_for("/webhook", payload_b)
+    assert fp_a in store
+    assert fp_b in store
+
+
+def test_check_and_remember_multiprocess_same_payload_only_one_first(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payload = {
+        "symbol": "MNQ",
+        "signal": "long_breakout",
+        "price": 20150.0,
+        "breakout_level": 20145.0,
+        "delta_strength": 0.9,
+    }
+
+    ctx = mp.get_context("spawn")
+    start_event = ctx.Event()
+    result_queue = ctx.Queue()
+    proc_count = 6
+    procs = [
+        ctx.Process(
+            target=_mp_check_and_remember_worker,
+            args=(str(target_path), "/webhook", payload, start_event, result_queue),
+        )
+        for _ in range(proc_count)
+    ]
+    for p in procs:
+        p.start()
+    # 所有 process 啟動後同時放行，增加同時競爭臨界區的機率。
+    start_event.set()
+    for p in procs:
+        p.join()
+
+    results = [result_queue.get() for _ in range(proc_count)]
+    assert results.count(False) == 1
+    assert results.count(True) == proc_count - 1
+
+
+def test_check_and_remember_multiprocess_different_payloads_no_lost_update(tmp_path, monkeypatch) -> None:
+    target_path = tmp_path / "output" / "webhook_dedupe.json"
+    monkeypatch.setenv("WEBHOOK_DEDUPE_PATH", str(target_path))
+    webhook_dedupe_module.get_dedupe_path.cache_clear()
+    payloads = [
+        {
+            "symbol": "MNQ",
+            "signal": "long_breakout",
+            "price": 20150.0,
+            "breakout_level": 20145.0,
+            "delta_strength": 0.9,
+        },
+        {
+            "symbol": "MNQ",
+            "signal": "short_breakout",
+            "price": 20140.0,
+            "breakout_level": 20142.0,
+            "delta_strength": 0.8,
+        },
+        {
+            "symbol": "NQ",
+            "signal": "long_breakout",
+            "price": 20200.0,
+            "breakout_level": 20190.0,
+            "delta_strength": 0.7,
+        },
+    ]
+
+    ctx = mp.get_context("spawn")
+    start_event = ctx.Event()
+    result_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_check_and_remember_worker,
+            args=(str(target_path), "/webhook", payload, start_event, result_queue),
+        )
+        for payload in payloads
+    ]
+    for p in procs:
+        p.start()
+    start_event.set()
+    for p in procs:
+        p.join()
+
+    results = [result_queue.get() for _ in range(len(payloads))]
+    assert results.count(False) == len(payloads)
+
+    store = json.loads(target_path.read_text(encoding="utf-8"))
+    assert isinstance(store, dict)
+    for payload in payloads:
+        fp = webhook_dedupe_module.fingerprint_for("/webhook", payload)
+        assert fp in store

@@ -2,6 +2,12 @@
 
 Breakout 訊號與 GEX 脈絡下的輕量決策實驗室：接收外部 alert、輸出結構化指令與日誌，方便接上實盤或通知層。
 
+## Architecture / Deployment
+
+- Webhook server 採用 `systemd` + Gunicorn 多 worker（單機部署）。
+- webhook 去重（dedupe）使用檔案型 store + file lock，支援多 process 原子 check-and-remember。
+- 詳細設計與 trade-offs 請參考：[docs/deployment.md](docs/deployment.md)。
+
 ### 本版重點（摘要）
 
 - **狀態與風控**：`state_manager` 載入／儲存、`reset_state_if_new_day`、`evaluate_state_gate`；決策日誌含 `state_snapshot_before` / `after`。
@@ -51,7 +57,7 @@ flowchart TB
 yui-quant-lab/
 ├── README.md
 ├── deploy/
-│   ├── yui-quant-lab.service   # systemd 範本（Gunicorn，workers=1）
+│   ├── yui-quant-lab.service   # systemd 範本（Gunicorn）
 │   └── nginx-yui-quant-lab.conf
 ├── docs/
 │   ├── architecture.md   # 系統架構與資料流
@@ -338,6 +344,30 @@ curl -i -X POST http://127.0.0.1/tv-webhook \
 cd ~/yui-quant-lab
 tail -n 20 output/signal_log.jsonl
 ```
+
+## Deployment Note（webhook_dedupe / Gunicorn 多 worker）
+
+目前部署採用 Gunicorn 多 worker（例如 `-w 2`）時，`webhook_dedupe` 已改為單機多 process 安全的原子流程：
+
+- dedupe 共享狀態儲存在 `output/webhook_dedupe.json`（可用 `WEBHOOK_DEDUPE_PATH` 覆寫）。
+- 核心 API 為 `check_and_remember(endpoint, payload) -> bool`：
+  - 回傳 `True`：代表 duplicate，應直接略過主流程。
+  - 回傳 `False`：代表非 duplicate，且已在同一臨界區完成 remember。
+- 臨界區使用 `fcntl.flock` 搭配獨立 lock 檔（例如 `output/webhook_dedupe.json.lock`），並包住完整 read-modify-write，避免 check-then-act 競態。
+- 寫檔仍使用原子覆蓋（`os.replace`），保留 TTL prune 與 store 大小保護。
+
+安全邊界（重要）：
+
+- 這是「單機」安全設計，適用同一台 VPS 的多 Gunicorn workers。
+- 不是跨多台 VPS / 多容器的全域一致性保證。
+- 若未來水平擴展到多機，應改用 Redis / DB / external lock。
+
+測試覆蓋（`unittest`）：
+
+- same payload only-one-first（multiprocessing）
+- different payload no-lost-update（multiprocessing）
+- TTL 視窗內 duplicate、過期後可再次處理
+- 不同 endpoint 同 payload 不互相 duplicate
 
 ### Fixture 重播與 E2E
 
