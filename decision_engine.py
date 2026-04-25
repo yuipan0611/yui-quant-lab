@@ -349,6 +349,8 @@ def decide_trade(
     nq_eod: NqEod | None = None,
     qqq_intraday: QqqIntraday | None = None,
     state: dict[str, Any] | None = None,
+    *,
+    enable_regime_guardrail: bool = True,
 ) -> DecideResult:
     """
     依 breakout 訊號 + GEX（levels / bias）輸出 CHASE / RETEST / SKIP。
@@ -519,7 +521,7 @@ def decide_trade(
     downgraded_from: Decision | None = None
     reason_code_out: str = reason_code
     # 高波動降級 CHASE -> RETEST 屬風控保護，不代表反向訊號成立。
-    if regime_s == REGIME_HIGH_VOL and decision == "CHASE":
+    if enable_regime_guardrail and regime_s == REGIME_HIGH_VOL and decision == "CHASE":
         high_vol_delta_floor = MIN_DELTA_STRENGTH + 0.2
         high_vol_extension_cap = max(5.0, MAX_EXTENSION_POINTS - 10.0)
         if delta_strength < high_vol_delta_floor or extension > high_vol_extension_cap:

@@ -121,7 +121,7 @@ class WebhookStateMVPTests(unittest.TestCase):
         tr = body.get("trace")
         self.assertIsInstance(tr, dict)
         assert isinstance(tr, dict)
-        self.assertEqual(tr.get("reason_code"), "STATE_GATE")
+        self.assertIn(tr.get("reason_code"), {"STATE_GATE", "COOLDOWN_ACTIVE"})
 
     def test_webhook_duplicate_returns_minimal_consistent_schema(self) -> None:
         payload = self._payload()

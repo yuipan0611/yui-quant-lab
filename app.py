@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from command_writer import append_signal_log, write_order_command
 from decision_engine import REASON_STATE_GATE, decide_trade
+from engine_types import DecisionSignal, GateContext
+from execution_router import build_execution_command, route_execution
 from execution_tracker import (
     apply_fill_to_order,
     apply_order_event,
@@ -29,6 +31,8 @@ from state_manager import (
     reset_state_if_new_day,
     save_state,
 )
+from risk_engine import build_trade_intent
+from state_gate import evaluate_gate
 from telegram_bot import notify_decision, notify_fill_result, process_telegram_webhook
 from time_utils import iso_now_taipei
 from webhook_dedupe import check_and_remember, fingerprint_for
@@ -171,6 +175,11 @@ def _safe_log(record: dict) -> None:
 _TV_SECRET_DEFAULT_WARNED = False
 
 
+def _engine_v2_enabled() -> bool:
+    raw = str(os.environ.get("ENGINE_V2_ENABLED", "false")).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _get_tv_webhook_secret() -> str:
     """讀取 TV_WEBHOOK_SECRET；未設定或空字串時使用 dev-secret 並於首次提示（不拋錯）。"""
     global _TV_SECRET_DEFAULT_WARNED
@@ -226,9 +235,7 @@ def process_webhook_payload(payload: dict, request_id: str) -> dict:
 
     state = reset_state_if_new_day(load_state())
     state_snapshot_before = deepcopy(state)
-    gate_result = evaluate_state_gate(state, payload)
-
-    if gate_result.get("allowed"):
+    if _engine_v2_enabled():
         nq_eod = payload.get("nq_eod") or {
             "levels": payload.get("levels", {}),
             "bias": payload.get("bias", "neutral"),
@@ -241,59 +248,154 @@ def process_webhook_payload(payload: dict, request_id: str) -> dict:
             nq_eod=nq_eod,
             qqq_intraday=qqq_intraday,
             state=state,
+            enable_regime_guardrail=False,
         )
-    else:
-        bias_gate = payload.get("bias", "neutral")
-        if not isinstance(bias_gate, str):
-            bias_gate = str(bias_gate)
-        regime_gate = state.get("regime")
-        regime_gate_s = str(regime_gate).strip() if regime_gate is not None else None
-        decision_result = {
-            "decision": "SKIP",
-            "reason": str(gate_result.get("reason", "state_gate_denied")),
-            "plan": {
-                "entry_style": "no_trade",
-                "risk_note": "state gate denied",
-                "reference_levels": {
-                    "price": float(payload["price"]),
-                    "breakout_level": float(payload["breakout_level"]),
-                    "nearest_resistance": None,
-                    "nearest_support": None,
-                    "extension": 0.0,
-                },
-            },
-            "trace": {
-                "decision": "SKIP",
-                "reason_code": REASON_STATE_GATE,
-                "inputs": {
-                    "delta_strength": float(payload.get("delta_strength", 0) or 0),
-                    "room_points": None,
-                    "extension_points": None,
-                    "regime": regime_gate_s or None,
-                    "bias": bias_gate,
-                },
-                "branch": "NONE",
-                "downgraded_from": None,
-                "timestamp": now_iso,
-            },
+        decision_signal = DecisionSignal(
+            trace_id=request_id,
+            event_id=request_id,
+            decision=decision_result["decision"],
+            reason=decision_result["reason"],
+            trace=decision_result.get("trace") or {},
+            plan=decision_result.get("plan") or {},
+            market_payload=payload,
+        )
+        v2_gate = evaluate_gate(
+            GateContext(
+                trace_id=request_id,
+                event_id=request_id,
+                payload=payload,
+                decision_signal=decision_signal,
+                state=state,
+                endpoint=payload.get("_source_endpoint", "/webhook"),
+            )
+        )
+        gate_result = {
+            "allowed": v2_gate.allow,
+            "decision": None,
+            "reason": v2_gate.reason_detail,
+            "reason_code": v2_gate.reason_code,
+            "details": v2_gate.details,
+            "blocked_until": v2_gate.blocked_until,
         }
+        if not v2_gate.allow:
+            decision_result = {
+                "decision": "SKIP",
+                "reason": v2_gate.reason_detail,
+                "plan": {
+                    "entry_style": "no_trade",
+                    "risk_note": "state gate denied",
+                    "reference_levels": {
+                        "price": float(payload["price"]),
+                        "breakout_level": float(payload["breakout_level"]),
+                        "nearest_resistance": None,
+                        "nearest_support": None,
+                        "extension": 0.0,
+                    },
+                },
+                "trace": {
+                    "decision": "SKIP",
+                    "reason_code": v2_gate.reason_code,
+                    "inputs": {
+                        "delta_strength": float(payload.get("delta_strength", 0) or 0),
+                        "room_points": None,
+                        "extension_points": None,
+                        "regime": state.get("regime"),
+                        "bias": payload.get("bias", "neutral"),
+                    },
+                    "branch": "NONE",
+                    "downgraded_from": None,
+                    "timestamp": now_iso,
+                },
+            }
+    else:
+        gate_result = evaluate_state_gate(state, payload)
+        if gate_result.get("allowed"):
+            nq_eod = payload.get("nq_eod") or {
+                "levels": payload.get("levels", {}),
+                "bias": payload.get("bias", "neutral"),
+            }
+            qqq_intraday = payload.get("qqq_intraday") or {
+                "regime": payload.get("regime", state.get("regime", "unknown")),
+            }
+            decision_result = decide_trade(
+                payload,
+                nq_eod=nq_eod,
+                qqq_intraday=qqq_intraday,
+                state=state,
+            )
+        else:
+            bias_gate = payload.get("bias", "neutral")
+            if not isinstance(bias_gate, str):
+                bias_gate = str(bias_gate)
+            regime_gate = state.get("regime")
+            regime_gate_s = str(regime_gate).strip() if regime_gate is not None else None
+            decision_result = {
+                "decision": "SKIP",
+                "reason": str(gate_result.get("reason", "state_gate_denied")),
+                "plan": {
+                    "entry_style": "no_trade",
+                    "risk_note": "state gate denied",
+                    "reference_levels": {
+                        "price": float(payload["price"]),
+                        "breakout_level": float(payload["breakout_level"]),
+                        "nearest_resistance": None,
+                        "nearest_support": None,
+                        "extension": 0.0,
+                    },
+                },
+                "trace": {
+                    "decision": "SKIP",
+                    "reason_code": REASON_STATE_GATE,
+                    "inputs": {
+                        "delta_strength": float(payload.get("delta_strength", 0) or 0),
+                        "room_points": None,
+                        "extension_points": None,
+                        "regime": regime_gate_s or None,
+                        "bias": bias_gate,
+                    },
+                    "branch": "NONE",
+                    "downgraded_from": None,
+                    "timestamp": now_iso,
+                },
+            }
 
     command_write = {"ok": False, "error": None}
     if decision_result["decision"] in ("CHASE", "RETEST"):
-        command = {
-            "action": decision_result["decision"],
-            "signal": payload["signal"],
-            "symbol": payload["symbol"],
-            "price": payload["price"],
-            "plan": decision_result["plan"],
-            "request_id": request_id,
-            "reason": decision_result["reason"],
-            "regime": state.get("regime"),
-            "state_version": state.get("version"),
-        }
         try:
-            write_order_command(command)
-            command_write["ok"] = True
+            if _engine_v2_enabled():
+                intent = build_trade_intent(
+                    request_id=request_id,
+                    trace_id=request_id,
+                    payload=payload,
+                    decision_signal=DecisionSignal(
+                        trace_id=request_id,
+                        event_id=request_id,
+                        decision=decision_result["decision"],
+                        reason=decision_result["reason"],
+                        trace=decision_result.get("trace") or {},
+                        plan=decision_result.get("plan") or {},
+                        market_payload=payload,
+                    ),
+                    state=state,
+                )
+                exec_cmd = build_execution_command(intent)
+                route_result = route_execution(exec_cmd)
+                command_write["ok"] = bool(route_result.get("ok"))
+                command_write["execution_mode"] = exec_cmd.mode
+            else:
+                command = {
+                    "action": decision_result["decision"],
+                    "signal": payload["signal"],
+                    "symbol": payload["symbol"],
+                    "price": payload["price"],
+                    "plan": decision_result["plan"],
+                    "request_id": request_id,
+                    "reason": decision_result["reason"],
+                    "regime": state.get("regime"),
+                    "state_version": state.get("version"),
+                }
+                write_order_command(command)
+                command_write["ok"] = True
             try:
                 create_order_record(
                     request_id=request_id,
@@ -307,7 +409,7 @@ def process_webhook_payload(payload: dict, request_id: str) -> dict:
                 print(f"[warn] create_order_record failed: {exc}")
         except Exception as exc:  # noqa: BLE001
             command_write["error"] = str(exc)
-            print(f"[error] write_order_command failed: {exc}")
+            print(f"[error] write execution command failed: {exc}")
             traceback.print_exc()
 
     state_after = apply_decision_effects(state, decision_result)
@@ -478,7 +580,9 @@ def webhook():
         ), 200
 
     request_id = _new_request_id()
-    result = process_webhook_payload(payload, request_id=request_id)
+    payload_for_engine = dict(payload)
+    payload_for_engine["_source_endpoint"] = "/webhook"
+    result = process_webhook_payload(payload_for_engine, request_id=request_id)
     return jsonify(
         {
             "status": "success",
@@ -539,6 +643,7 @@ def tv_webhook():
     now_iso = iso_now_taipei()
     sanitized = _sanitize_tv_payload_for_log(body)
     internal = adapt_tv_payload(sanitized)
+    internal["_source_endpoint"] = "/tv-webhook"
 
     _safe_log(
         {
